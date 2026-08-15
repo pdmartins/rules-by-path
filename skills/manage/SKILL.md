@@ -45,7 +45,7 @@ validates what it writes.
 - The hook reads the rules on every Read/Edit/Write/MultiEdit/NotebookEdit and
   injects the ones whose glob matches the touched file.
 - A rule is injected **in full once per session**, then **reinforced with a
-  one-line reminder** every N tool calls (default 25; `RULES_BY_PATH_REINFORCE_EVERY`
+  one-line reminder** every N file-tool calls (default 25; `RULES_BY_PATH_REINFORCE_EVERY`
   sets it globally, `reinforce:` in a rule's frontmatter overrides it per rule,
   `never` disables it). Long-context sessions drift away from a rule injected
   hundreds of thousands of tokens earlier.

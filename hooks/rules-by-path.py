@@ -601,7 +601,15 @@ def open_state(state_path):
             raw += chunk
         if not raw.strip():
             return fd, empty
-        data = json.loads(raw.decode("utf-8", "replace"))
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            # Unreadable state (a crash mid-write, or an older format): start
+            # over and KEEP the fd so the next save overwrites it. Returning
+            # without the fd would leave it broken for the whole session, and
+            # every rule would re-inject in full on every single tool call.
+            warn(f"state file {state_path} unreadable; starting a fresh one")
+            return fd, empty
         if not isinstance(data, dict):
             return fd, empty
         seen = data.get("seen")
@@ -681,12 +689,19 @@ def neutralize(content, nonce):
 
 def summarize(body):
     """The one line worth repeating when reinforcing a rule already in context.
-    Reinforcement has to be cheap or it is not worth doing at all."""
+    Reinforcement has to be cheap or it is not worth doing at all.
+
+    Skips markup that carries no instruction on its own — a heading, a code
+    fence, a horizontal rule, a bullet marker — so the reminder is the first
+    line that actually says something."""
     for line in body.split("\n"):
-        text = line.strip().lstrip("#").strip()
-        if text and not text.startswith("---"):
+        text = line.strip()
+        if text.startswith("```") or text.startswith("---") or text.startswith("<!--"):
+            continue
+        text = text.lstrip("#").lstrip("-*+ ").strip()
+        if len(text) >= 8:
             return text[:200]
-    return ""
+    return body.strip()[:200]
 
 
 def build_context(abs_path, blocks):
@@ -787,8 +802,6 @@ def main():
     if not scopes:
         return
     candidates, legacy_scopes = collect_candidates(abs_path, scopes)
-    if not candidates and not legacy_scopes:
-        return
 
     default_interval = reinforce_default()
     state_path = state_file_for(payload.get("session_id"))
@@ -833,9 +846,16 @@ def main():
                            "text": text, "reminder": reminder})
             seen[key] = call_number
 
+        # The legacy notice is told once per scope per session. Repeating it on
+        # every tool call would be noise the user cannot silence except by
+        # migrating, which is exactly what they may not be ready to do yet.
         for label in legacy_scopes:
+            key = f"legacy::{label}"
+            if key in seen:
+                continue
             blocks.append({"name": "legacy-format", "scope": label, "glob": "-",
                            "text": LEGACY_NOTICE, "reminder": False})
+            seen[key] = call_number
 
         save_state(state_fd, state)
         if not blocks:

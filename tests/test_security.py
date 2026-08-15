@@ -178,12 +178,29 @@ class DenialOfServiceTest(unittest.TestCase):
         self.assertLess(time.perf_counter() - start, 10.0)
         self.assertIn("GOOD RULE", util.injected_text(proc))
 
-    def test_no_state_file_when_nothing_matches(self):
-        util.write_rule(self.proj, "nope.md", "nope/**", "RULE")
+    def test_no_state_file_when_no_rules_exist_anywhere(self):
+        """A session in a project with no rules must leave nothing behind. (A
+        session where rules DO exist keeps state: the reinforcement counter has
+        to advance on every touch, not only on the ones that match, or it would
+        never measure how far the context has moved.)"""
         util.run_hook(util.read_payload(
             "Read", os.path.join(self.proj, "src", "a.py"), session="quiet"), self.home)
         state = os.path.join(self.home, ".claude", "cache", "rules-by-path")
         self.assertEqual(os.listdir(state) if os.path.isdir(state) else [], [])
+
+    def test_counter_advances_on_non_matching_touches(self):
+        util.write_rule(self.proj, "src.md", "src/**", "Validate the DTOs always.")
+        env = {"RULES_BY_PATH_REINFORCE_EVERY": "3"}
+        matching = util.read_payload("Read", os.path.join(self.proj, "src", "a.py"),
+                                     session="dist")
+        other = util.read_payload("Read", os.path.join(self.proj, "elsewhere.txt"),
+                                  session="dist")
+        self.assertIsNotNone(util.injected_text(util.run_hook(matching, self.home, env=env)))
+        for _ in range(3):
+            util.run_hook(other, self.home, env=env)  # context moves on
+        text = util.injected_text(util.run_hook(matching, self.home, env=env))
+        self.assertIsNotNone(text, "distance is measured in tool calls, not matches")
+        self.assertIn("REMINDER", text)
 
     def test_state_uses_plugin_data_dir_when_provided(self):
         util.write_rule(self.proj, "src.md", "src/**", "RULE")
@@ -451,3 +468,104 @@ class RealWorldLayoutTest(unittest.TestCase):
         proc = util.run_hook(util.read_payload(
             "Read", os.path.join(self.proj, "src", "a.py")), self.home)
         self.assertIsNone(util.injected_text(proc))
+
+
+class FourthRoundTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
+        self.scope = util.scope_dir(self.proj)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def admin(self, *args, stdin=""):
+        return util.run_admin(list(args), self.home, stdin_text=stdin)
+
+    def write_legacy(self, rules_target=None):
+        os.makedirs(self.scope, exist_ok=True)
+        with open(os.path.join(self.scope, "rules-map.yml"), "w", encoding="utf-8") as h:
+            h.write('rules:\n  - glob: "**"\n    rule: "CLAUDE.md"\n')
+        if rules_target:
+            os.symlink(rules_target, os.path.join(self.scope, "rules"))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_migrate_refuses_a_symlinked_legacy_rules_directory(self):
+        """migrate re-created the `rules/` level the rewrite removed from the
+        hook, without the containment check that came with it — so a cloned
+        repo could read AND delete the user's files."""
+        victim_dir = os.path.join(self.tmp.name, "victim")
+        os.makedirs(victim_dir)
+        victim = os.path.join(victim_dir, "CLAUDE.md")
+        with open(victim, "w", encoding="utf-8") as handle:
+            handle.write("PRIVATE GLOBAL INSTRUCTIONS")
+        self.write_legacy(rules_target=victim_dir)
+        proc = self.admin("migrate", "--root", self.proj)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertTrue(os.path.isfile(victim), "the victim file was deleted")
+        self.assertFalse(os.path.isfile(os.path.join(self.scope, "CLAUDE.md")),
+                         "the victim file was stolen into the repo")
+
+    def test_legacy_glob_containing_hash_survives_migration(self):
+        os.makedirs(os.path.join(self.scope, "rules"), exist_ok=True)
+        with open(os.path.join(self.scope, "rules-map.yml"), "w", encoding="utf-8") as h:
+            h.write('rules:\n  - glob: "src/c#/**"\n    rule: "csharp.md"\n')
+        with open(os.path.join(self.scope, "rules", "csharp.md"), "w", encoding="utf-8") as h:
+            h.write("C# rule")
+        self.admin("migrate", "--root", self.proj)
+        with open(os.path.join(self.scope, "csharp.md"), encoding="utf-8") as handle:
+            self.assertIn("glob: src/c#/**", handle.read())
+
+    def test_show_update_round_trip_is_idempotent(self):
+        """The skill documents show -> edit -> update; it used to nest the
+        frontmatter inside the body and the rule stopped matching."""
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--reinforce", "10", stdin="Validate the DTOs.")
+        shown = self.admin("show", "--root", self.proj, "--rule", "src.md").stdout
+        self.admin("update", "--root", self.proj, "--rule", "src.md", stdin=shown)
+        again = self.admin("show", "--root", self.proj, "--rule", "src.md").stdout
+        self.assertEqual(shown, again)
+        self.assertEqual(again.count("---\n"), 2, "exactly one frontmatter block")
+        payload = util.read_payload("Read", os.path.join(self.proj, "src", "a.py"))
+        self.assertIsNotNone(util.injected_text(util.run_hook(payload, self.home)))
+
+    def test_a_body_that_starts_with_a_rule_of_its_own_is_not_eaten(self):
+        body = "---\ntitle: not our frontmatter\n---\nThe actual rule."
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--rule", "keep.md", stdin=body)
+        shown = self.admin("show", "--root", self.proj, "--rule", "keep.md").stdout
+        self.assertIn("title: not our frontmatter", shown)
+
+    def test_glob_with_a_newline_is_refused(self):
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**\nreinforce: 1",
+                          "--rule", "x.md", stdin="RULE")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("invalid glob", proc.stderr)
+
+    def test_corrupt_state_file_is_repaired(self):
+        util.write_rule(self.proj, "src.md", "src/**", "RULE BODY")
+        state_dir = os.path.join(self.home, ".claude", "cache", "rules-by-path")
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "broken.json"), "w", encoding="utf-8") as handle:
+            handle.write("{not json at all")
+        payload = util.read_payload("Read", os.path.join(self.proj, "src", "a.py"),
+                                    session="broken")
+        self.assertIsNotNone(util.injected_text(util.run_hook(payload, self.home)))
+        second = util.injected_text(util.run_hook(payload, self.home))
+        self.assertIsNone(second, "the repaired state must dedup on the next call")
+
+    def test_legacy_notice_is_told_once_per_session(self):
+        self.write_legacy()
+        payload = util.read_payload("Read", os.path.join(self.proj, "src", "a.py"),
+                                    session="legacy")
+        first = util.injected_text(util.run_hook(payload, self.home))
+        self.assertIn("migrate", first)
+        second = util.injected_text(util.run_hook(payload, self.home))
+        self.assertIsNone(second, "the notice must not repeat on every tool call")
+
+    def test_reminder_skips_headings_and_code_fences(self):
+        body = "# Title\n\n```\ncode\n```\n\nAlways validate the DTOs before saving."
+        self.assertEqual(HOOK.summarize(body), "Always validate the DTOs before saving.")

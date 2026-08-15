@@ -59,7 +59,7 @@ Project scopes are created implicitly by the first `add --root <root>`.
 ## 3b. Reinforcement interval (optional)
 
 A rule is injected in full once per session, then repeated as a one-line
-reminder every 25 tool calls. On very long contexts a shorter interval keeps
+reminder every 25 file-tool calls. On very long contexts a shorter interval keeps
 rules present; on short sessions it is noise. To change it globally, add to
 `~/.claude/settings.json`:
 
@@ -80,6 +80,8 @@ adds these to `permissions.deny` in `~/.claude/settings.json`:
 ```json
 "Read(**/.claude/rules-by-path/**)",
 "Edit(**/.claude/rules-by-path/**)",
+"Write(**/.claude/rules-by-path/**)",
+"MultiEdit(**/.claude/rules-by-path/**)",
 "Grep(**/.claude/rules-by-path/**)"
 ```
 

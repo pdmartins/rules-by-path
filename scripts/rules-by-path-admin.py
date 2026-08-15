@@ -137,15 +137,47 @@ def rules_in(scope_dir):
     return rules
 
 
-def render_rule(globs, body, reinforce=None):
+OWN_KEYS = {"glob", "globs", "reinforce", "description"}
+
+
+def check_glob(glob):
+    """A glob is written verbatim into frontmatter, so it must not be able to
+    add lines to it."""
+    if not glob or any(ch in glob for ch in "\r\n") or not glob.isprintable():
+        fail(f"invalid glob (one printable line, no control characters): {glob[:60]!r}")
+    if len(glob) > HOOK.MAX_GLOB_CHARS:
+        fail(f"glob longer than {HOOK.MAX_GLOB_CHARS} characters")
+    return glob
+
+
+def split_submitted(text):
+    """(body, fields) for content arriving on stdin.
+
+    `show` prints the whole file, and the skill documents show -> edit ->
+    update as the way to change a rule, so stdin routinely arrives WITH the
+    frontmatter still attached. Treating it as body text nests one frontmatter
+    inside another and the rule stops matching. The block is only consumed when
+    it parses to this plugin's own keys, so a rule whose body legitimately
+    starts with `---` is left alone."""
+    fields, body = HOOK.parse_frontmatter(text)
+    if fields and set(fields) <= OWN_KEYS:
+        return body.strip(), fields
+    return text.strip(), {}
+
+
+def render_rule(globs, body, reinforce=None, extra=None):
     lines = ["---"]
     if len(globs) == 1:
-        lines.append(f"glob: {globs[0]}")
+        lines.append(f"glob: {check_glob(globs[0])}")
     else:
         lines.append("glob:")
-        lines.extend(f"  - {glob}" for glob in globs)
+        lines.extend(f"  - {check_glob(glob)}" for glob in globs)
     if reinforce:
         lines.append(f"reinforce: {reinforce}")
+    for key, value in (extra or {}).items():
+        if key in ("glob", "globs", "reinforce") or isinstance(value, list):
+            continue
+        lines.append(f"{key}: {value}")
     lines.append("---")
     lines.append("")
     return "\n".join(lines) + body.strip() + "\n"
@@ -255,10 +287,10 @@ def warn_if_long(name, body):
 
 def cmd_add(args):
     scope_dir, _ = scope_for(args)
-    body = sys.stdin.read().strip()
+    body, submitted = split_submitted(sys.stdin.read())
     if not body:
         fail("empty rule content — send the markdown via stdin")
-    globs = [g.strip() for g in args.glob if g.strip()]
+    globs = [g.strip() for g in args.glob if g.strip()] or HOOK.globs_of(submitted)
     if not globs:
         fail("'add' requires at least one --glob")
     name = args.rule or HOOK.derive_rule_name(globs[0])
@@ -271,7 +303,12 @@ def cmd_add(args):
         fail(f"{name} already exists in this scope; use --force to overwrite, "
              f"`update --rule {name}` to replace its body, or pass another --rule")
     os.makedirs(scope_dir, exist_ok=True)
-    atomic_write(path, render_rule(globs, body, args.reinforce))
+    reinforce = args.reinforce or submitted.get("reinforce") or None
+    if isinstance(reinforce, list):
+        reinforce = reinforce[0] if reinforce else None
+    atomic_write(path, render_rule(globs, body, reinforce,
+                                   {k: v for k, v in submitted.items()
+                                    if k not in OWN_KEYS or k == "description"}))
     print(f"ok: {name}  <-  {', '.join(globs)}")
     warn_if_long(name, body)
     validate_scope(scope_dir, quiet=True)
@@ -279,7 +316,7 @@ def cmd_add(args):
 
 def cmd_update(args):
     scope_dir, _ = scope_for(args)
-    body = sys.stdin.read().strip()
+    body, submitted = split_submitted(sys.stdin.read())
     if not body:
         fail("empty rule content — send the markdown via stdin")
     path = rule_path(scope_dir, args.rule)
@@ -289,13 +326,21 @@ def cmd_update(args):
     if result is None:
         fail(f"cannot read {args.rule}")
     fields = result[0]
-    globs = [g.strip() for g in args.glob if g.strip()] or HOOK.globs_of(fields)
+    # Precedence: explicit CLI flag, then what was submitted on stdin, then
+    # what the rule already had — so a show -> edit -> update round trip keeps
+    # everything the user did not deliberately change.
+    globs = ([g.strip() for g in args.glob if g.strip()]
+             or HOOK.globs_of(submitted) or HOOK.globs_of(fields))
     if not globs:
         fail(f"{args.rule} declares no glob; pass --glob to set one")
-    reinforce = args.reinforce or fields.get("reinforce") or None
+    reinforce = (args.reinforce or submitted.get("reinforce")
+                 or fields.get("reinforce") or None)
     if isinstance(reinforce, list):
         reinforce = reinforce[0] if reinforce else None
-    atomic_write(path, render_rule(globs, body, reinforce))
+    extra = {k: v for k, v in {**fields, **submitted}.items() if k not in OWN_KEYS}
+    if "description" in {**fields, **submitted}:
+        extra["description"] = {**fields, **submitted}["description"]
+    atomic_write(path, render_rule(globs, body, reinforce, extra))
     print(f"ok: updated {args.rule}")
     warn_if_long(args.rule, body)
     validate_scope(scope_dir, quiet=True)
@@ -380,6 +425,51 @@ def cmd_validate(args):
         sys.exit(1)
 
 
+def strip_yaml_comment(line):
+    """Remove a trailing YAML comment, honouring quoted spans. Cutting at the
+    first '#' corrupts a glob that legitimately contains one — the exact bug
+    the old parser shipped, reintroduced here if this is naive."""
+    quote = None
+    skip = False
+    for index, char in enumerate(line):
+        if skip:
+            skip = False
+            continue
+        if quote:
+            if char == "\\" and quote == '"':
+                skip = True
+            elif char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#":
+            return line[:index]
+    return line
+
+
+def read_legacy_rule(legacy_dir, name):
+    """Read one legacy rule file without following a symlink, bounded. The
+    plain open() this replaced was both a TOCTOU window and an unbounded read."""
+    import stat as stat_module
+    path = os.path.join(legacy_dir, name)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat_module.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
+            fd = None
+            return handle.read(HOOK.MAX_RULE_CHARS + 1).strip()
+    except Exception:
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def read_legacy_map(map_path):
     """[(glob, rule_name)] from a legacy map. Tolerant by design: this runs
     once, and refusing to migrate a slightly odd map helps nobody."""
@@ -391,7 +481,7 @@ def read_legacy_map(map_path):
     entries = []
     pending = None
     for raw in lines:
-        stripped = "" if raw.lstrip().startswith("#") else raw.split("#", 1)[0].strip()
+        stripped = "" if raw.lstrip().startswith("#") else strip_yaml_comment(raw).strip()
         if not stripped or stripped.startswith("rules:"):
             continue
         if stripped.startswith("- glob:"):
@@ -424,6 +514,17 @@ def cmd_migrate(args):
     if not os.path.isfile(map_path):
         print("nothing to migrate: no legacy rules-map.yml in this scope")
         return
+    # The legacy `rules/` directory is a level the rewrite removed from the
+    # hook, so its containment check went with it — and this command brought
+    # the directory back. Without this gate a cloned repo shipping
+    # `rules -> ~/.claude` makes migrate read and then DELETE the user's files.
+    if os.path.exists(legacy_dir):
+        expected = os.path.join(os.path.realpath(scope_dir), LEGACY_RULES_SUBDIR)
+        if os.path.islink(legacy_dir) or os.path.realpath(legacy_dir) != expected:
+            fail(f"{legacy_dir} does not physically live inside {scope_dir} "
+                 f"(symlink?); refusing to touch it")
+        if not HOOK.is_safely_owned(legacy_dir):
+            fail(f"{legacy_dir} is not safely owned; refusing to touch it")
     entries = read_legacy_map(map_path)
     if not entries:
         fail("the legacy map has no readable entries; migrate it by hand")
@@ -439,12 +540,11 @@ def cmd_migrate(args):
         if not HOOK.is_valid_rule_name(name):
             skipped.append(f"{name[:60]!r}: not a usable rule file name")
             continue
-        source = os.path.join(legacy_dir, name)
-        if os.path.islink(source) or not os.path.isfile(source):
-            skipped.append(f"{name}: rule file missing in {LEGACY_RULES_SUBDIR}/")
+        body = read_legacy_rule(legacy_dir, name)
+        if body is None:
+            skipped.append(f"{name}: rule file missing or unreadable in "
+                           f"{LEGACY_RULES_SUBDIR}/")
             continue
-        with open(source, encoding="utf-8") as handle:
-            body = handle.read().strip()
         if not body:
             skipped.append(f"{name}: empty")
             continue

@@ -18,7 +18,7 @@ per issue those reviews found.
   Read/Edit/Write/MultiEdit/NotebookEdit, once per rule version per session.
   Editing a rule re-injects it immediately.
 - **Reinforcement** — after the full injection, a rule is repeated as a
-  one-line reminder every N tool calls (default 25, `RULES_BY_PATH_REINFORCE_EVERY`
+  one-line reminder every N file-tool calls (default 25, `RULES_BY_PATH_REINFORCE_EVERY`
   or per-rule `reinforce:`; `never` opts out). A rule injected hundreds of
   thousands of tokens ago has faded, and a long-context session never compacts,
   so it never gets the SessionStart reset either.

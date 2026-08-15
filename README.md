@@ -22,8 +22,8 @@ repo, and the guidance still isn't tied to what the agent actually touches.
 - The first time Claude touches a matching file, the rule is injected into
   context (`additionalContext`) — labeled with its glob and scope.
 - Injection happens **once per rule version per session**, then a one-line
-  **reminder** every N tool calls, so a rule does not fade out of a very long
-  context. Editing a rule re-injects it in full immediately.
+  **reminder** every N file-tool calls, so a rule does not fade out of a very
+  long context. Editing a rule re-injects it in full immediately.
 - Zero context cost for rules that never become relevant.
 
 The hook also **blocks the creation of nested `CLAUDE.md` files** inside a
@@ -91,7 +91,7 @@ repo, so the whole team shares them.
 ## Reinforcement
 
 A rule is injected in full the first time it is relevant, then repeated as a
-one-line reminder every 25 tool calls. On a long-context session a rule
+one-line reminder every 25 file-tool calls. On a long-context session a rule
 injected hundreds of thousands of tokens ago has effectively faded; a short
 reminder costs little and keeps it live.
 
@@ -177,6 +177,8 @@ guarantees listed above, each covered by a regression test in
   "deny": [
     "Read(**/.claude/rules-by-path/**)",
     "Edit(**/.claude/rules-by-path/**)",
+    "Write(**/.claude/rules-by-path/**)",
+    "MultiEdit(**/.claude/rules-by-path/**)",
     "Grep(**/.claude/rules-by-path/**)"
   ]
 }
