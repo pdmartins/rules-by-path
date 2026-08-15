@@ -100,29 +100,35 @@ def derive_rule_name(glob):
 
 
 def is_valid_rule_name(rule_name):
-    return bool(HOOK.RULE_NAME_RE.match(rule_name))
+    return HOOK.is_valid_rule_name(rule_name)
 
 
 def paths_for(args):
     if args.use_global:
-        base = os.path.join(os.path.expanduser("~"), RULES_DIR_RELPATH)
+        anchor = os.path.expanduser("~")
         header = HEADER_GLOBAL
     else:
-        root = os.path.abspath(args.root)
-        if not os.path.isdir(root):
-            fail(f"project root does not exist: {root}")
-        base = os.path.join(root, RULES_DIR_RELPATH)
+        anchor = os.path.abspath(args.root)
+        if not os.path.isdir(anchor):
+            fail(f"project root does not exist: {anchor}")
         header = HEADER_PROJECT
-    return base, os.path.join(base, MAP_FILE_NAME), os.path.join(base, RULES_SUBDIR_NAME), header
+    base = os.path.join(anchor, RULES_DIR_RELPATH)
+    # The scope directory must physically live under the root the caller named.
+    # Without this, a cloned repo shipping `.claude/rules-by-path` as a symlink
+    # redirects every read, write and delete — a project-scoped `add` would
+    # land in the user's GLOBAL rules and apply to every project forever.
+    if not HOOK.scope_is_contained(anchor, base):
+        fail(f"{base} does not physically live inside {anchor} (symlink?); refusing to touch it")
+    return base, os.path.join(base, MAP_FILE_NAME), os.path.join(base, RULES_SUBDIR_NAME), header, anchor
 
 
-def safe_rules_dir(map_path, rules_dir):
+def safe_rules_dir(map_path, rules_dir, anchor):
     """The rules directory, verified to be a real directory inside the scope.
     Refusing here is what stops a cloned repo from steering writes and unlinks
     through a symlinked `rules/`."""
     if not os.path.exists(rules_dir):
         return rules_dir  # not created yet; makedirs will create a real dir
-    resolved = HOOK.resolve_rules_dir(map_path)
+    resolved = HOOK.resolve_rules_dir(map_path, anchor)
     if resolved is None:
         fail(f"{rules_dir} is not a real directory inside the scope (symlink?); refusing to touch it")
     return resolved
@@ -139,6 +145,19 @@ def load_entries(map_path):
     except HOOK.MapParseError as exc:
         fail(f"{exc}\nrefusing to write: fix or delete the map first, "
              f"otherwise this command would discard every entry in it")
+
+
+def load_entries_reporting(map_path):
+    """(entries, parse_error). `validate` exists to detect breakage, so it must
+    surface a map it could not parse rather than treating it as empty."""
+    if not os.path.isfile(map_path):
+        return [], None
+    # `validate` exists to detect breakage, so it uses the strict posture: a
+    # line this code could not understand is a problem to report, not to skip.
+    try:
+        return HOOK.load_raw_entries(map_path, strict=True), None
+    except HOOK.MapParseError as exc:
+        return [], str(exc)
 
 
 def load_entries_lenient(map_path):
@@ -199,14 +218,14 @@ def resolved_rule(entry):
 
 
 def cmd_init(args):
-    base, map_path, rules_dir, header = paths_for(args)
+    base, map_path, rules_dir, header, anchor = paths_for(args)
     os.makedirs(rules_dir, exist_ok=True)
     write_map(map_path, header, load_entries(map_path))
     print(f"ok: skeleton ready at {base}")
 
 
 def cmd_which(args):
-    base, map_path, rules_dir, _ = paths_for(args)
+    base, map_path, rules_dir, _, anchor = paths_for(args)
     if args.use_global:
         abs_path = os.path.abspath(args.path)
         rel_path = None
@@ -251,17 +270,23 @@ def cmd_which(args):
         gone = "" if os.path.isfile(os.path.join(rules_dir, rule_name)) else "  (rule MISSING)"
         print(f"match: rule {rule_name}{gone}")
     if not matches:
-        if is_dir_query:
-            suggestion = f"{shown.rstrip('/')}/**"
+        scope_flag = "--global" if args.use_global else "--root <root>"
+        if os.path.isdir(abs_path) or args.path.endswith("/"):
+            suggestions = [f"{shown.rstrip('/')}/**"]
+        elif not os.path.exists(abs_path) and not looks_like_a_file:
+            # Could be a folder or an extension-less file; suggesting only the
+            # folder form yields a rule that never fires for the file case.
+            suggestions = [f"{shown.rstrip('/')}/**", shown]
         else:
             parent = os.path.dirname(shown).replace(os.sep, "/")
-            suggestion = f"{parent}/**" if parent and parent != "/" else shown
-        print(f"no entry covers '{shown}' — to create one: "
-              f"add {'--global' if args.use_global else '--root <root>'} --glob '{suggestion}'")
+            suggestions = [f"{parent}/**" if parent and parent != "/" else shown]
+        print(f"no entry covers '{shown}' — to create one:")
+        for suggestion in suggestions:
+            print(f"  add {scope_flag} --glob '{suggestion}'")
 
 
 def cmd_list(args):
-    _, map_path, rules_dir, _ = paths_for(args)
+    _, map_path, rules_dir, _, anchor = paths_for(args)
     if not os.path.isfile(map_path):
         print("(no rules-map.yml in this scope)")
         return
@@ -275,10 +300,10 @@ def cmd_list(args):
 
 
 def cmd_show(args):
-    base, map_path, rules_dir, _ = paths_for(args)
+    base, map_path, rules_dir, _, anchor = paths_for(args)
     if not is_valid_rule_name(args.rule):
         fail(f"invalid rule name: {args.rule!r}")
-    rules_dir = HOOK.resolve_rules_dir(map_path)
+    rules_dir = HOOK.resolve_rules_dir(map_path, anchor)
     if rules_dir is None:
         fail("the rules/ directory is not a real directory inside the scope")
     path = os.path.join(rules_dir, args.rule)
@@ -292,7 +317,7 @@ def cmd_show(args):
 
 
 def cmd_add(args):
-    base, map_path, rules_dir, header = paths_for(args)
+    base, map_path, rules_dir, header, anchor = paths_for(args)
     content = sys.stdin.read().strip()
     if not content:
         fail("empty rule content — send the markdown via stdin")
@@ -309,23 +334,26 @@ def cmd_add(args):
     if collision:
         fail(f"the file {rule_name} already belongs to another glob — "
              f"update it with `update --rule {rule_name}`, or pass a different --rule")
-    rules_dir = safe_rules_dir(map_path, rules_dir)
+    rules_dir = safe_rules_dir(map_path, rules_dir, anchor)
     os.makedirs(rules_dir, exist_ok=True)
+    old_name = None
     if existing:
         old_name = resolved_rule(existing)
-        if old_name != rule_name:
-            unlink_rule_file(rules_dir, old_name)
         existing["rule"] = rule_name
     else:
         entries.append({"glob": args.glob, "rule": rule_name})
+    # Write the replacement and commit the map BEFORE removing the old file:
+    # unlinking first destroys content whenever a later step refuses to run.
     write_rule_file(rules_dir, rule_name, content)
     write_map(map_path, header, entries)
+    if old_name and old_name != rule_name:
+        unlink_rule_file(rules_dir, old_name)
     print(f"ok: registered -> {rule_name}")
-    validate(base, map_path)
+    validate(base, map_path, anchor)
 
 
 def cmd_update(args):
-    base, map_path, rules_dir, header = paths_for(args)
+    base, map_path, rules_dir, header, anchor = paths_for(args)
     content = sys.stdin.read().strip()
     if not content:
         fail("empty rule content — send the markdown via stdin")
@@ -334,10 +362,10 @@ def cmd_update(args):
     entries = load_entries(map_path)
     if not any(resolved_rule(e) == args.rule for e in entries):
         fail(f"no entry uses the rule file {args.rule!r} — register it with `add --glob ...`")
-    rules_dir = safe_rules_dir(map_path, rules_dir)
+    rules_dir = safe_rules_dir(map_path, rules_dir, anchor)
     write_rule_file(rules_dir, args.rule, content)
     print(f"ok: updated {args.rule}")
-    validate(base, map_path)
+    validate(base, map_path, anchor)
 
 
 def write_rule_file(rules_dir, rule_name, content):
@@ -368,7 +396,7 @@ def warn(message):
 
 
 def cmd_remove(args):
-    base, map_path, rules_dir, header = paths_for(args)
+    base, map_path, rules_dir, header, anchor = paths_for(args)
     entries = load_entries(map_path)
     # Removing by rule NAME is the safe path when the glob came out of the map
     # (repository data); removing by glob is for a glob the user just named.
@@ -382,20 +410,22 @@ def cmd_remove(args):
             fail(f"glob not registered: {args.glob!r}")
     kept = [e for e in entries if e is not target]
     rule_name = resolved_rule(target)
-    rules_dir = safe_rules_dir(map_path, rules_dir)
+    rules_dir = safe_rules_dir(map_path, rules_dir, anchor)
     write_map(map_path, header, kept)
     still_used = any(resolved_rule(e) == rule_name for e in kept)
     if not still_used:
         unlink_rule_file(rules_dir, rule_name)
     print(f"ok: removed entry (rule {rule_name}"
           f"{' kept, used by another glob' if still_used else ' deleted'})")
-    validate(base, map_path)
+    validate(base, map_path, anchor)
 
 
-def validate(base, map_path):
+def validate(base, map_path, anchor):
     problems = []
-    entries = load_entries_lenient(map_path)
-    rules_dir = HOOK.resolve_rules_dir(map_path)
+    entries, parse_error = load_entries_reporting(map_path)
+    if parse_error:
+        problems.append(f"map cannot be parsed: {parse_error}")
+    rules_dir = HOOK.resolve_rules_dir(map_path, anchor)
     if rules_dir is None and entries:
         fail("the rules/ directory is not a real directory inside the scope (symlink?)")
     for entry in entries:
@@ -414,11 +444,11 @@ def validate(base, map_path):
 
 
 def cmd_validate(args):
-    base, map_path, _, _ = paths_for(args)
+    base, map_path, _, _, anchor = paths_for(args)
     if not os.path.isfile(map_path):
         print("(no rules-map.yml in this scope — nothing to validate)")
         return
-    validate(base, map_path)
+    validate(base, map_path, anchor)
 
 
 def main():
@@ -439,6 +469,8 @@ def main():
         fail("'add' requires --glob")
     if args.command == "remove" and not (args.glob or args.rule):
         fail("'remove' requires --glob or --rule")
+    if args.command == "remove" and args.glob and args.rule:
+        fail("'remove' takes --glob OR --rule, not both")
     if args.command in ("show", "update") and not args.rule:
         fail(f"'{args.command}' requires --rule")
     if args.command == "which" and not args.path:

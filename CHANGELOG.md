@@ -29,16 +29,20 @@ Rule content is trusted at the level of a repository's `CLAUDE.md` — cloning a
 repo means trusting its rules. What the plugin enforces mechanically is that a
 rule can only inject *its own text*:
 
-- **Containment** — the `rules/` directory must be a real directory inside the
-  map's own folder; rule files are opened with `O_NOFOLLOW` and must be regular
-  files; rule names must be plain `*.md` names. A hostile map cannot reach a
-  private key, `/etc`, or `/proc/self/environ`.
+- **Containment** — a scope directory must physically live inside the root it
+  claims (so a symlinked `.claude` or `.claude/rules-by-path` cannot redirect
+  reads, writes or deletes into your global rules); its `rules/` must be a real
+  directory inside it; rule files are opened with `O_NOFOLLOW` and must be
+  regular files; rule names must be plain, bounded `*.md` names. A hostile map
+  cannot reach a private key, `/etc`, or `/proc/self/environ`.
 - **Safe writes** — the CLI writes through `mkstemp` (random name, `O_EXCL`,
   mode 0600) and `os.replace`, so no planted symlink can redirect a write; every
   unlink is gated on a validated rule name, so no map entry can steer a delete.
 - **Unforgeable provenance** — each injection carries a random per-call marker
   and the header declares how many blocks legitimately carry it. Content that
-  impersonates the plugin's own framing is defanged.
+  impersonates the plugin's own framing is defanged, and every untrusted value
+  interpolated into a block header (rule name, glob, scope, path) is stripped
+  of control and formatting characters.
 - **Bounded trust** — the upward search stops at the repository root, ignores
   maps in world-writable directories (POSIX only), and is capped at 8 maps per
   tool call.

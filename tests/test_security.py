@@ -388,6 +388,153 @@ class AdminSecurityRegressionTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
+class ScopeContainmentTest(unittest.TestCase):
+    """Third-round finding: containment validated everything INSIDE the scope
+    directory but never the scope directory itself, so a symlinked
+    `.claude` or `.claude/rules-by-path` redirected reads, writes and deletes —
+    a project-scoped `add` could land in the user's global rules."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "clone")
+        self.victim = os.path.join(self.tmp.name, "victim")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(self.proj, ".claude"))
+        os.makedirs(os.path.join(self.victim, "rules"))
+        with open(os.path.join(self.victim, "rules-map.yml"), "w", encoding="utf-8") as h:
+            h.write('rules:\n  - glob: "important/**"\n    rule: "important.md"\n')
+        with open(os.path.join(self.victim, "rules", "important.md"), "w", encoding="utf-8") as h:
+            h.write("USER'S OWN RULE")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def admin(self, *args, stdin=""):
+        return util.run_admin(list(args), self.home, stdin_text=stdin)
+
+    def link_scope(self):
+        os.symlink(self.victim, os.path.join(self.proj, ".claude", "rules-by-path"))
+
+    def link_dot_claude(self):
+        """The symlink one level higher — the variant that slipped past the
+        ownership check because lstat of a symlink reports mode 0777."""
+        import shutil
+        shutil.rmtree(os.path.join(self.proj, ".claude"))
+        holder = os.path.join(self.tmp.name, "holder")
+        os.makedirs(holder)
+        os.rename(self.victim, os.path.join(holder, "rules-by-path"))
+        self.victim = os.path.join(holder, "rules-by-path")
+        os.symlink(holder, os.path.join(self.proj, ".claude"))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_add_cannot_write_outside_the_declared_root(self):
+        self.link_scope()
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
+                          "--rule", "evil.md", stdin="ATTACKER RULE")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.victim, "rules", "evil.md")))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_remove_cannot_delete_outside_the_declared_root(self):
+        self.link_scope()
+        proc = self.admin("remove", "--root", self.proj, "--glob", "important/**")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self.victim, "rules", "important.md")))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_show_cannot_read_outside_the_declared_root(self):
+        self.link_scope()
+        proc = self.admin("show", "--root", self.proj, "--rule", "important.md")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("USER'S OWN RULE", proc.stdout)
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_symlinked_dot_claude_is_refused_too(self):
+        self.link_dot_claude()
+        proc = self.admin("remove", "--root", self.proj, "--glob", "important/**")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self.victim, "rules", "important.md")))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_hook_does_not_inject_from_a_symlinked_scope(self):
+        os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
+        os.makedirs(os.path.join(self.proj, "important"), exist_ok=True)
+        self.link_scope()
+        payload = util.read_payload("Read", os.path.join(self.proj, "important", "x.py"))
+        proc = util.run_hook(payload, self.home)
+        self.assertNotIn("USER'S OWN RULE", proc.stdout)
+
+
+class ThirdRoundTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
+        self.base = os.path.join(self.proj, ".claude", "rules-by-path")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def admin(self, *args, stdin=""):
+        return util.run_admin(list(args), self.home, stdin_text=stdin)
+
+    def test_validate_fails_on_an_unparseable_map(self):
+        """It used to swallow the parse error and print 'validation ok: 0'."""
+        os.makedirs(self.base, exist_ok=True)
+        with open(os.path.join(self.base, "rules-map.yml"), "w", encoding="utf-8") as h:
+            h.write("rules:\n  - [broken: yaml\n   nope\n")
+        proc = self.admin("validate", "--root", self.proj)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertNotIn("validation ok", proc.stdout)
+
+    def test_force_rename_keeps_content_when_the_write_is_refused(self):
+        """Unlinking the old rule first destroyed content whenever a later step
+        refused to run."""
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--rule", "old.md", stdin="ORIGINAL")
+        rules_dir = os.path.join(self.base, "rules")
+        self.assertTrue(os.path.isfile(os.path.join(rules_dir, "old.md")))
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
+                          "--rule", "new.md", "--force", stdin="REPLACEMENT")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(rules_dir, "new.md"), encoding="utf-8") as h:
+            self.assertIn("REPLACEMENT", h.read())
+        self.assertFalse(os.path.isfile(os.path.join(rules_dir, "old.md")))
+
+    def test_remove_rejects_glob_and_rule_together(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="X")
+        proc = self.admin("remove", "--root", self.proj,
+                          "--glob", "src/**", "--rule", "src.md")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("not both", proc.stderr)
+
+    def test_which_offers_both_shapes_for_an_extensionless_unknown_path(self):
+        self.admin("add", "--root", self.proj, "--glob", "other/**", stdin="X")
+        proc = self.admin("which", "--root", self.proj, "--path", "scripts/deploy")
+        self.assertIn("scripts/deploy/**", proc.stdout)
+        self.assertIn("--glob 'scripts/deploy'", proc.stdout)
+
+    def test_overlong_rule_name_fails_cleanly(self):
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
+                          "--rule", "x" * 300 + ".md", stdin="X")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_untrusted_label_cannot_break_out_of_the_block_header(self):
+        """Rule name, glob and scope are interpolated into the nonce-marked
+        header; a bidi control or a newline there would forge framing."""
+        self.assertEqual(HOOK.sanitize_label("ok‮nome\nquebrado"), "oknomequebrado")
+        self.assertLessEqual(len(HOOK.sanitize_label("z" * 500)), 200)
+
+    def test_fallback_parser_keeps_hash_after_an_escaped_quote(self):
+        text = 'rules:\n  - glob: "a\\"b#c/**"\n    rule: "weird.md"\n'
+        entries = HOOK.parse_map_without_yaml(text, "m")
+        self.assertEqual(entries, [{"glob": 'a"b#c/**', "rule": "weird.md"}])
+
+
 class HookSecondRoundTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

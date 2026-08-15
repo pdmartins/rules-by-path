@@ -1,0 +1,16 @@
+#!/bin/sh
+# rules-by-path SessionStart reset launcher. A dedicated entry point instead of
+# passing --reset-session as an argument: the hook config then needs no `args`
+# array, which older Claude Code builds ignore silently.
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case $LINK in /*) SELF=$LINK ;; *) SELF=$(dirname -- "$SELF")/$LINK ;; esac
+done
+DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd) || exit 0
+for PY in python3 python; do
+    if command -v "$PY" >/dev/null 2>&1; then
+        exec "$PY" "$DIR/hooks/rules-by-path.py" --reset-session
+    fi
+done
+exit 0

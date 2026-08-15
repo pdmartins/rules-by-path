@@ -6,8 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-hook",
-            "args": [],
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-hook\"",
             "timeout": 10
           }
         ]
@@ -19,8 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-hook",
-            "args": ["--reset-session"],
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-reset\"",
             "timeout": 10,
             "async": true
           }

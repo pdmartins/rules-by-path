@@ -18,6 +18,5 @@
   ],
   "homepage": "https://github.com/pdmartins/rules-by-path",
   "repository": "https://github.com/pdmartins/rules-by-path",
-  "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "skills": "./skills/"
 }

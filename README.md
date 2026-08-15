@@ -104,11 +104,12 @@ repo, so the whole team shares them.
   skipped with a warning, and at most 8 ancestor maps are consulted.
 - **No pathological matching**: globs are matched by a non-backtracking
   segment matcher, not a regex, so no glob can burn CPU or stall a tool call.
-- **Stays inside the scope**: the `rules/` directory must be a real directory
-  inside the map's own folder, rule files are opened without following
-  symlinks and must be regular files, and rule names must be plain `*.md`
-  names. A hostile map cannot point at a private key, `/etc`, or
-  `/proc/self/environ`.
+- **Stays inside the scope**: `.claude/rules-by-path` must physically live
+  inside the project it claims to belong to, its `rules/` must be a real
+  directory inside it, rule files are opened without following symlinks and
+  must be regular files, and rule names must be plain, bounded `*.md` names. A
+  hostile map cannot point at a private key, `/etc`, `/proc/self/environ`, or
+  your global rules.
 - **Bounded trust**: the upward search stops at the repository root, and a map
   in a world-writable directory (a shared `/tmp`, say) is ignored — a
   directory you don't control cannot inject instructions into your session.
