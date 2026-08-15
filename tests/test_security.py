@@ -144,11 +144,18 @@ class SecurityRegressionTest(unittest.TestCase):
         self.assertIsNone(util.hook_output(util.run_hook(payload, self.home)))
 
     def test_global_scope_gets_budget_before_project_rules(self):
-        """A hostile repo must not be able to starve the user's own rules."""
-        util.write_rule_setup(self.home, [("**", "mine.md", "GLOBAL GUARDRAIL")])
-        util.write_rule_setup(self.proj, [("src/**", "big.md", "X" * 47_000)])
+        """A hostile repo must not be able to starve the user's own rules.
+
+        Sized so the order decides the outcome: three project rules of 15,900
+        (47,700) leave 300 of the 48,000 budget, and the global rule needs 500.
+        Global first -> global fits and the third project rule is deferred;
+        project first -> the global rule is the one that gets dropped."""
+        util.write_rule_setup(self.home, [("**", "mine.md", "GLOBAL GUARDRAIL " + "g" * 480)])
+        util.write_rule_setup(self.proj, [("src/**", f"big{i}.md", f"BIG{i} " + "X" * 15_890)
+                                          for i in range(3)])
         _, context = self.inject()
         self.assertIn("GLOBAL GUARDRAIL", context)
+        self.assertNotIn("BIG2", context, "the budget must actually be exhausted here")
 
     # --- denial of service --------------------------------------------------
 
@@ -196,9 +203,13 @@ class SecurityRegressionTest(unittest.TestCase):
         self.assertIsNotNone(second, "an edited rule must reach the model")
         self.assertIn("VERSION TWO", second)
 
-    def test_nested_claude_md_guard_is_case_insensitive(self):
+    def test_nested_claude_md_guard_follows_filesystem_case_rules(self):
+        """Case variants are the same file only where the filesystem says so;
+        blocking `claude.md` on Linux would block a legitimate distinct file."""
         os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
-        for name in ("CLAUDE.md", "claude.md", "Claude.MD"):
+        variants = ("CLAUDE.md", "claude.md", "Claude.MD") if HOOK.CASE_INSENSITIVE_FS \
+            else ("CLAUDE.md",)
+        for name in variants:
             payload = util.read_payload("Write", self.target(f"src/{name}"))
             out = util.hook_output(util.run_hook(payload, self.home))
             self.assertIsNotNone(out, name)
@@ -296,6 +307,132 @@ class AdminSecurityRegressionTest(unittest.TestCase):
         proc = self.admin("update", "--root", self.proj, "--rule", "ghost.md", stdin="X")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("no entry uses", proc.stderr)
+
+    # --- second-round findings ---------------------------------------------
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_planted_tmp_symlink_cannot_redirect_a_rule_write(self):
+        """A predictable `<rule>.md.tmp` was a symlink target an attacker could
+        plant in advance, turning an add into an arbitrary file overwrite."""
+        victim = os.path.join(self.tmp.name, "bashrc")
+        with open(victim, "w", encoding="utf-8") as handle:
+            handle.write("ORIGINAL CONTENT")
+        rules_dir = os.path.join(self.base, "rules")
+        os.makedirs(rules_dir, exist_ok=True)
+        os.symlink(victim, os.path.join(rules_dir, "src.md.tmp"))
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="PWNED")
+        with open(victim, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "ORIGINAL CONTENT",
+                             f"the victim file was overwritten (exit={proc.returncode})")
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_planted_tmp_symlink_cannot_redirect_a_map_write(self):
+        victim = os.path.join(self.tmp.name, "CLAUDE.md")
+        with open(victim, "w", encoding="utf-8") as handle:
+            handle.write("USER GLOBAL INSTRUCTIONS")
+        os.makedirs(self.base, exist_ok=True)
+        os.symlink(victim, os.path.join(self.base, "rules-map.yml.tmp"))
+        self.admin("init", "--root", self.proj)
+        with open(victim, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "USER GLOBAL INSTRUCTIONS")
+
+    def test_hostile_rule_name_in_map_cannot_delete_files(self):
+        """`add --force` renamed the rule file and unlinked the OLD name, taken
+        verbatim from repo-controlled map data."""
+        victim = os.path.join(self.tmp.name, "precious.txt")
+        with open(victim, "w", encoding="utf-8") as handle:
+            handle.write("KEEP ME")
+        os.makedirs(os.path.join(self.base, "rules"), exist_ok=True)
+        with open(os.path.join(self.base, "rules-map.yml"), "w", encoding="utf-8") as handle:
+            handle.write(f'rules:\n  - glob: "src/**"\n    rule: "{victim}"\n')
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
+                          "--force", stdin="NEW")
+        self.assertTrue(os.path.isfile(victim),
+                        f"the victim file was deleted (exit={proc.returncode})")
+        self.assertNotEqual(proc.returncode, 0, "a hostile rule name must abort the write")
+
+    def test_non_ascii_glob_survives_a_write(self):
+        """json.dumps escapes non-ASCII by default; the fallback parser does not
+        decode \\uXXXX, so an accented glob silently stopped matching."""
+        glob = "src/ação/**"
+        proc = self.admin("add", "--root", self.proj, "--glob", glob,
+                          "--rule", "acao.md", stdin="RULE")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.base, "rules-map.yml"), encoding="utf-8") as handle:
+            self.assertIn("ação", handle.read())
+        payload = util.read_payload("Read", os.path.join(self.proj, "src", "ação", "x.py"))
+        out = util.hook_output(util.run_hook(payload, self.home))
+        self.assertIsNotNone(out, "the accented glob must still match")
+
+    def test_show_does_not_truncate_a_long_rule(self):
+        """show feeds the show -> edit -> update round trip; truncating here
+        destroyed the tail of a long rule on the next update."""
+        long_rule = "L" * 20_000
+        self.admin("add", "--root", self.proj, "--glob", "src/**", stdin=long_rule)
+        proc = self.admin("show", "--root", self.proj, "--rule", "src.md")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertGreaterEqual(len(proc.stdout.strip()), 20_000)
+        self.assertNotIn("truncated", proc.stdout)
+
+    def test_read_only_commands_work_on_a_partly_broken_map(self):
+        """Strict parsing must not brick list/which/validate: a user with one
+        bad entry still needs to see what is registered."""
+        self.admin("add", "--root", self.proj, "--glob", "good/**", stdin="GOOD")
+        map_path = os.path.join(self.base, "rules-map.yml")
+        with open(map_path, "a", encoding="utf-8") as handle:
+            handle.write("  - nonsense entry\n")
+        proc = self.admin("list", "--root", self.proj)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("good/**", proc.stdout)
+        proc = self.admin("which", "--root", self.proj, "--path", "good/x.py")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class HookSecondRoundTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
+        self.base = os.path.join(self.proj, ".claude", "rules-by-path")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_yaml_alias_bomb_does_not_hang_the_hook(self):
+        """A tiny map with YAML anchors expands to billions of nodes; repr()ing
+        a parsed value walked the whole expansion on every tool call."""
+        bomb = "rules:\n"
+        bomb += "  - &a [x, x, x, x, x, x, x, x, x]\n"
+        for letter in "bcdefghi":
+            prev = chr(ord(letter) - 1)
+            bomb += f"  - &{letter} [{', '.join(['*' + prev] * 9)}]\n"
+        bomb += "  - [*i, *i, *i]\n"
+        os.makedirs(self.base, exist_ok=True)
+        with open(os.path.join(self.base, "rules-map.yml"), "w", encoding="utf-8") as handle:
+            handle.write(bomb)
+        payload = util.read_payload("Read", os.path.join(self.proj, "src", "a.py"))
+        start = time.perf_counter()
+        proc = util.run_hook(payload, self.home, timeout=25)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(proc.returncode, 0)
+        self.assertLess(elapsed, 10.0, "the hook must not blow its 10s budget")
+
+    def test_claude_md_guard_matches_exact_case_everywhere(self):
+        os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
+        payload = util.read_payload("Write", os.path.join(self.proj, "src", "CLAUDE.md"))
+        out = util.hook_output(util.run_hook(payload, self.home))
+        self.assertIsNotNone(out)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    @unittest.skipIf(HOOK.CASE_INSENSITIVE_FS, "case-insensitive filesystem")
+    def test_lowercase_claude_md_allowed_on_case_sensitive_fs(self):
+        """On Linux `claude.md` is a genuinely different file; blocking it is
+        over-reach."""
+        os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
+        payload = util.read_payload("Write", os.path.join(self.proj, "src", "claude.md"))
+        self.assertIsNone(util.hook_output(util.run_hook(payload, self.home)))
 
 
 if __name__ == "__main__":

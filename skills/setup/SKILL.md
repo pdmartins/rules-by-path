@@ -37,10 +37,13 @@ printf '{"tool_name":"Read","tool_input":{"file_path":"%s/setup-probe.txt"},"ses
 
 Expected: `exit=0` and no output (nothing matches a probe file) — or JSON with
 `additionalContext` if a global rule happens to match. A traceback or a
-non-zero exit means a broken installation. Clean up afterwards:
+non-zero exit means a broken installation. Clean up afterwards — the state dir
+is `$CLAUDE_PLUGIN_DATA/state` when that variable is set (the normal case for a
+plugin install), otherwise `~/.claude/cache/rules-by-path`:
 
 ```bash
-rm -f ~/.claude/cache/rules-by-path/rbp-setup-probe.injected
+rm -f "${CLAUDE_PLUGIN_DATA:-$HOME/.claude/cache}"/state/rbp-setup-probe.injected \
+      ~/.claude/cache/rules-by-path/rbp-setup-probe.injected
 ```
 
 ## 3. Initialize the global scope (optional)
@@ -103,7 +106,9 @@ the hook and the skills, but three things linger. Walk the user through them:
 1. **Deny rules** in `~/.claude/settings.json` — if the hardening was applied,
    remove the `**/.claude/rules-by-path/**` entries from `permissions.deny`,
    otherwise those paths stay unreadable with nothing left to serve them.
-2. **Cached state** — `rm -rf ~/.claude/cache/rules-by-path`.
+2. **Cached state** — `rm -rf ~/.claude/cache/rules-by-path` and, if
+   `CLAUDE_PLUGIN_DATA` was in play, that plugin's data directory under
+   `~/.claude/plugins/data/`.
 3. **Rule data** — `~/.claude/rules-by-path/` and each project's
    `.claude/rules-by-path/`. Ask before deleting: this is the user's authored
    content, and it is worth keeping if they may reinstall.

@@ -2,7 +2,12 @@
 # rules-by-path PreToolUse hook launcher. Exits 0 even when Python is missing:
 # a hook must never block a tool call, and a non-zero exit on every Read would
 # make the plugin unusable instead of merely inactive.
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 0
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case $LINK in /*) SELF=$LINK ;; *) SELF=$(dirname -- "$SELF")/$LINK ;; esac
+done
+DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd) || exit 0
 for PY in python3 python; do
     if command -v "$PY" >/dev/null 2>&1; then
         exec "$PY" "$DIR/hooks/rules-by-path.py" "$@"

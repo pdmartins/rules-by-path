@@ -17,7 +17,7 @@ Subcommands:
         [--force]            overwrite an existing entry for the same glob
   update --rule N            replace an existing rule's content (stdin), by file
                              name — never requires pasting a glob back
-  remove --glob G            drop the entry and its rule file
+  remove --glob G | --rule N drop the entry and its rule file
   validate                   check map shape, names, containment and rule files
 
 Scope: --root <project-root> (project) or --global (~/.claude).
@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 
 RULES_DIR_RELPATH = os.path.join(".claude", "rules-by-path")
 MAP_FILE_NAME = "rules-map.yml"
@@ -128,8 +129,9 @@ def safe_rules_dir(map_path, rules_dir):
 
 
 def load_entries(map_path):
-    """Return entries as [{'glob': ..., 'rule': ... or None}] preserving order.
-    Aborts on an unreadable map so a read-modify-write cannot wipe it."""
+    """Entries for a command that WRITES. Aborts on anything not fully
+    understood, so a read-modify-write cannot wipe or mangle the map, and so a
+    hostile rule name never reaches a filesystem call."""
     if not os.path.isfile(map_path):
         return []
     try:
@@ -139,22 +141,57 @@ def load_entries(map_path):
              f"otherwise this command would discard every entry in it")
 
 
-def write_map(map_path, header, entries):
-    """Replace the map atomically — no window where it sits truncated."""
-    directory = os.path.dirname(map_path)
+def load_entries_lenient(map_path):
+    """Entries for a read-only command. Reports what it could not parse instead
+    of refusing — a user whose map has one bad line still needs to be able to
+    list it and find out what is wrong."""
+    if not os.path.isfile(map_path):
+        return []
+    try:
+        return HOOK.load_raw_entries(map_path, strict=False)
+    except HOOK.MapParseError as exc:
+        print(f"rules-by-path-admin: {exc}", file=sys.stderr)
+        return []
+
+
+def atomic_write(path, text):
+    """Replace `path` atomically, without ever writing through a symlink.
+
+    The temp file is created by mkstemp (random name, O_EXCL, mode 0600) in the
+    destination directory: a predictable `path + '.tmp'` is a symlink target an
+    attacker can plant in advance, which turns any write into an arbitrary file
+    overwrite. `os.replace` then swaps the inode rather than following a link."""
+    if os.path.islink(path):
+        fail(f"{path} is a symlink; refusing to write through it")
+    directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
-    tmp_path = map_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.write(header)
-        for entry in entries:
-            # json.dumps produces a valid YAML double-quoted scalar, so a glob
-            # containing a quote, backslash or '#' round-trips intact.
-            handle.write(f"  - glob: {json.dumps(entry['glob'])}\n")
-            if entry["rule"]:
-                handle.write(f"    rule: {json.dumps(entry['rule'])}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, map_path)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".rbp-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def write_map(map_path, header, entries):
+    lines = [header]
+    for entry in entries:
+        # json.dumps produces a valid YAML double-quoted scalar, so a glob
+        # containing a quote, backslash or '#' round-trips intact.
+        # ensure_ascii=False keeps non-ASCII globs literal: the \uXXXX escapes
+        # json.dumps emits by default are decoded by PyYAML but not by the
+        # fallback parser, so an accented glob would stop matching without it.
+        lines.append(f"  - glob: {json.dumps(entry['glob'], ensure_ascii=False)}\n")
+        if entry["rule"]:
+            lines.append(f"    rule: {json.dumps(entry['rule'], ensure_ascii=False)}\n")
+    atomic_write(map_path, "".join(lines))
 
 
 def resolved_rule(entry):
@@ -183,10 +220,15 @@ def cmd_which(args):
             fail(f"path outside the root {root}: {abs_path}")
         shown = rel_path
     abs_posix = abs_path.replace(os.sep, "/")
-    entries = load_entries(map_path)
+    entries = load_entries_lenient(map_path)
     # A folder query ("--path docs") must also find entries like 'docs/**',
     # which only match paths INSIDE the folder — probe with a synthetic child.
-    is_dir_query = os.path.isdir(abs_path) or args.path.endswith("/")
+    # A path that does not exist yet and has no file extension is treated as a
+    # folder: asking about a folder you are about to create is the normal case
+    # when registering a rule, and it used to report a spurious "no match".
+    looks_like_a_file = "." in os.path.basename(abs_path.rstrip("/"))
+    is_dir_query = (os.path.isdir(abs_path) or args.path.endswith("/")
+                    or (not os.path.exists(abs_path) and not looks_like_a_file))
     targets = [(rel_path, abs_posix)]
     if is_dir_query:
         child = "__probe__"
@@ -223,7 +265,7 @@ def cmd_list(args):
     if not os.path.isfile(map_path):
         print("(no rules-map.yml in this scope)")
         return
-    entries = load_entries(map_path)
+    entries = load_entries_lenient(map_path)
     if not entries:
         print("(no rules registered in this scope)")
     for entry in entries:
@@ -236,10 +278,17 @@ def cmd_show(args):
     base, map_path, rules_dir, _ = paths_for(args)
     if not is_valid_rule_name(args.rule):
         fail(f"invalid rule name: {args.rule!r}")
-    content = HOOK.read_rule_content(map_path, args.rule)
-    if content is None:
+    rules_dir = HOOK.resolve_rules_dir(map_path)
+    if rules_dir is None:
+        fail("the rules/ directory is not a real directory inside the scope")
+    path = os.path.join(rules_dir, args.rule)
+    if os.path.islink(path) or not os.path.isfile(path):
         fail(f"cannot read rule {args.rule!r} in this scope")
-    print(content)
+    # Read the file whole. The hook truncates at 16k for context budget, but
+    # `show` feeds the show -> edit -> update round trip: truncating here would
+    # silently destroy the tail of a long rule on the next update.
+    with open(path, encoding="utf-8") as handle:
+        sys.stdout.write(handle.read())
 
 
 def cmd_add(args):
@@ -264,8 +313,8 @@ def cmd_add(args):
     os.makedirs(rules_dir, exist_ok=True)
     if existing:
         old_name = resolved_rule(existing)
-        if old_name != rule_name and os.path.isfile(os.path.join(rules_dir, old_name)):
-            os.unlink(os.path.join(rules_dir, old_name))
+        if old_name != rule_name:
+            unlink_rule_file(rules_dir, old_name)
         existing["rule"] = rule_name
     else:
         entries.append({"glob": args.glob, "rule": rule_name})
@@ -292,31 +341,52 @@ def cmd_update(args):
 
 
 def write_rule_file(rules_dir, rule_name, content):
-    """Write a rule file without following a symlink at the destination."""
+    if not is_valid_rule_name(rule_name):
+        fail(f"invalid rule name: {rule_name!r}")
+    atomic_write(os.path.join(rules_dir, rule_name), content + "\n")
+
+
+def unlink_rule_file(rules_dir, rule_name):
+    """Delete a rule file, but only when the name is one we would have written.
+
+    Rule names come out of the map, which is repository data. An absolute name
+    makes os.path.join discard rules_dir entirely, and '../' walks out of the
+    scope — either one turns a rename into arbitrary file deletion."""
+    if not is_valid_rule_name(rule_name):
+        warn(f"refusing to delete {rule_name!r}: not a plain '*.md' file name")
+        return
     path = os.path.join(rules_dir, rule_name)
     if os.path.islink(path):
-        fail(f"{rule_name} is a symlink; refusing to write through it")
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        handle.write(content + "\n")
-    os.replace(tmp_path, path)
+        warn(f"refusing to delete {rule_name}: it is a symlink")
+        return
+    if os.path.isfile(path):
+        os.unlink(path)
+
+
+def warn(message):
+    print(f"rules-by-path-admin: {message}", file=sys.stderr)
 
 
 def cmd_remove(args):
     base, map_path, rules_dir, header = paths_for(args)
     entries = load_entries(map_path)
-    target = next((e for e in entries if e["glob"] == args.glob), None)
-    if target is None:
-        fail(f"glob not registered: {args.glob!r}")
+    # Removing by rule NAME is the safe path when the glob came out of the map
+    # (repository data); removing by glob is for a glob the user just named.
+    if args.rule:
+        target = next((e for e in entries if resolved_rule(e) == args.rule), None)
+        if target is None:
+            fail(f"no entry uses the rule file {args.rule!r}")
+    else:
+        target = next((e for e in entries if e["glob"] == args.glob), None)
+        if target is None:
+            fail(f"glob not registered: {args.glob!r}")
     kept = [e for e in entries if e is not target]
     rule_name = resolved_rule(target)
     rules_dir = safe_rules_dir(map_path, rules_dir)
     write_map(map_path, header, kept)
     still_used = any(resolved_rule(e) == rule_name for e in kept)
-    rule_path = os.path.join(rules_dir, rule_name)
-    if not still_used and is_valid_rule_name(rule_name) \
-            and os.path.isfile(rule_path) and not os.path.islink(rule_path):
-        os.unlink(rule_path)
+    if not still_used:
+        unlink_rule_file(rules_dir, rule_name)
     print(f"ok: removed entry (rule {rule_name}"
           f"{' kept, used by another glob' if still_used else ' deleted'})")
     validate(base, map_path)
@@ -324,7 +394,7 @@ def cmd_remove(args):
 
 def validate(base, map_path):
     problems = []
-    entries = load_entries(map_path)
+    entries = load_entries_lenient(map_path)
     rules_dir = HOOK.resolve_rules_dir(map_path)
     if rules_dir is None and entries:
         fail("the rules/ directory is not a real directory inside the scope (symlink?)")
@@ -365,8 +435,10 @@ def main():
     parser.add_argument("--path", help="file/folder to resolve (which)")
     parser.add_argument("--json", action="store_true", help="machine-readable output (which)")
     args = parser.parse_args()
-    if args.command in ("add", "remove") and not args.glob:
-        fail(f"'{args.command}' requires --glob")
+    if args.command == "add" and not args.glob:
+        fail("'add' requires --glob")
+    if args.command == "remove" and not (args.glob or args.rule):
+        fail("'remove' requires --glob or --rule")
     if args.command in ("show", "update") and not args.rule:
         fail(f"'{args.command}' requires --rule")
     if args.command == "which" and not args.path:

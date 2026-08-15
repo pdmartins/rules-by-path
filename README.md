@@ -77,9 +77,10 @@ docs/"*, *"update the terraform rule"*.
 | **Project** | `<project-root>/.claude/rules-by-path/` | paths relative to the project root |
 | **Global** | `~/.claude/rules-by-path/` | absolute paths |
 
-Nested projects work: all ancestor projects of a touched file apply, nearest
-first, then the global scope. Project rules are committed with the repo, so
-the whole team shares them.
+Nested projects work: all ancestor projects of a touched file apply, up to the
+repository root. Your global rules are budgeted first, so rules arriving with a
+cloned repo can never crowd them out. Project rules are committed with the
+repo, so the whole team shares them.
 
 ## Glob semantics
 
@@ -111,6 +112,8 @@ the whole team shares them.
 - **Bounded trust**: the upward search stops at the repository root, and a map
   in a world-writable directory (a shared `/tmp`, say) is ignored — a
   directory you don't control cannot inject instructions into your session.
+  The ownership half of that check relies on POSIX permission bits and is not
+  enforced on Windows.
 - **Unforgeable provenance**: each injection carries a random per-call marker,
   and the header states how many blocks legitimately carry it. Rule content
   cannot forge a block claiming to come from a more trusted scope.
@@ -181,9 +184,11 @@ Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directl
 "<plugin>/bin/rules-by-path" validate --root <root>
 ```
 
-- **Rule not injecting?** Each rule version injects once per session; delete
-  `~/.claude/cache/rules-by-path/<session_id>.injected` to force it. Check the
-  rule is inside the repository — the search stops at the repo root.
+- **Rule not injecting?** Each rule version injects once per session. The
+  state lives in `$CLAUDE_PLUGIN_DATA/state/` for a plugin install (falling
+  back to `~/.claude/cache/rules-by-path/`); delete
+  `<state-dir>/<session_id>.injected` to force re-injection. Check the rule is
+  inside the repository — the search stops at the repo root.
 - **Nothing happens at all?** Run `/rules-by-path:setup`, which smoke-tests the
   hook and reports whether Python was found.
 - **Hook errors** are printed to stderr (visible in verbose mode) and never

@@ -58,6 +58,39 @@ a regression test).
 - `derive_rule_name` drops leading `*`/`**` segments (`**/deploy/**` produced
   the unusable name `**--deploy.md`).
 
+### Second audit round
+
+A verification pass over the fixes above found that two of them had opened new
+holes; both are closed and covered by regression tests.
+
+- **Arbitrary file overwrite through the atomic write** — the new map/rule
+  writes used a predictable `<name>.tmp`, so a symlink planted at that exact
+  path in a cloned repo redirected the write to any file the user could write
+  (a shell rc file, the user's global CLAUDE.md). Writes now go through
+  `mkstemp` (random name, `O_EXCL`, mode 0600).
+- **Arbitrary file deletion via a rule name** — `add --force` unlinked the
+  previous rule name taken verbatim from repo-controlled map data; an absolute
+  name made `os.path.join` discard the scope entirely. Rule names are now
+  validated at parse time for every writing command, and every unlink is gated.
+- **YAML alias expansion DoS** — a tiny map with anchors expands to billions of
+  nodes, and `repr()`-ing a parsed value walked all of them on every tool call.
+  Parsed values are no longer repr'd.
+- **Non-ASCII globs were silently corrupted** — `json.dumps` escaped them to
+  `\uXXXX`, which PyYAML decodes but the fallback parser does not, so an
+  accented glob stopped matching on machines without PyYAML.
+- **`show` truncated at 16k**, so the show → edit → update round trip the manage
+  skill mandates destroyed the tail of a long rule.
+- `hooks.json` uses exec form (the shell form breaks under PowerShell on
+  Windows); the `.cmd` launchers no longer swallow the exit code in a `for`
+  body; the shell launchers resolve `$0` through symlinks.
+- The CLAUDE.md guard matches case-insensitively only on case-insensitive
+  filesystems — blocking `claude.md` on Linux was over-reach.
+- Read-only CLI commands (`list`, `which`, `validate`) no longer refuse to run
+  on a map with one unparseable entry; only writing commands are strict.
+- The temp-dir state fallback is per-uid, mode 0700, and rejects a symlink.
+- Rule content that impersonates the plugin's own header is defanged, so a rule
+  cannot claim the authenticity marker was rotated.
+
 ### Portability
 
 - Stdlib-only Python; PyYAML optional, with a fallback parser for the map

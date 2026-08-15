@@ -92,8 +92,10 @@ you rather than quietly drop entries.
    and `cat` on those paths. Read before you overwrite: `update` replaces the
    whole file.
 
-   Never paste a glob you read out of a map back onto a command line. Globs are
-   repo data; rule file names are validated, glob strings are not.
+   Never paste a glob you read out of a map back onto a command line — use the
+   rule file name instead (`update --rule`, `remove --rule`). Globs are repo
+   data; rule file names are validated, glob strings are not. A glob on the
+   command line should only ever be one the user just gave you.
 
 ## Glob semantics
 
@@ -112,6 +114,9 @@ you rather than quietly drop entries.
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" list     --root "<root>"
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" validate --root "<root>"
+# remove by rule file name (safe: names are validated, globs are repo data)
+"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" remove   --root "<root>" --rule src--api.md
+# or by a glob the USER just named
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" remove   --root "<root>" --glob 'src/api/**'
 ```
 

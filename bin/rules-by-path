@@ -1,7 +1,12 @@
 #!/bin/sh
 # rules-by-path admin CLI launcher. Resolves whichever Python is available so
 # the plugin does not depend on a `python3` name that many installs lack.
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+SELF=$0
+while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case $LINK in /*) SELF=$LINK ;; *) SELF=$(dirname -- "$SELF")/$LINK ;; esac
+done
+DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd) || exit 1
 for PY in python3 python; do
     if command -v "$PY" >/dev/null 2>&1; then
         exec "$PY" "$DIR/scripts/rules-by-path-admin.py" "$@"
