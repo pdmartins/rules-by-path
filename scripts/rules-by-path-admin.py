@@ -1,75 +1,40 @@
 #!/usr/bin/env python3
 """rules-by-path-admin — management CLI for the rules-by-path plugin.
 
-The recommended hardening deny-lists the rules directories for Claude's file
-tools, and Bash write commands whose command line contains their literal path
-are denied as well. This script is the sanctioned management channel: it takes
-`--root`/`--global` plus the entry data (rule content on stdin) and performs
-all file I/O internally, so no denied path ever appears on a command line.
+A rule is one markdown file in `.claude/rules-by-path/` that declares its own
+glob in frontmatter. There is no index file to keep in sync, so there is
+nothing this tool can corrupt on your behalf.
+
+The recommended hardening deny-lists the rules directory for Claude's file
+tools; this script is the sanctioned management channel, taking `--root` or
+`--global` plus the rule content on stdin and doing all file I/O internally.
 Used by the `rules-by-path:manage` skill.
 
 Subcommands:
-  init                       create/refresh the skeleton (keeps existing entries)
-  list                       print the map and the rule files
-  show  --rule N             print one rule's content (the sanctioned read path)
-  which --path P             show which entries cover a path (hook's own matching)
-  add   --glob G [--rule N]  register a rule; markdown content read from stdin
-        [--force]            overwrite an existing entry for the same glob
-  update --rule N            replace an existing rule's content (stdin), by file
-                             name — never requires pasting a glob back
-  remove --glob G | --rule N drop the entry and its rule file
-  validate                   check map shape, names, containment and rule files
+  init                        create the scope directory
+  list                        one line per rule: file <- globs
+  show   --rule N             print a rule's full content
+  which  --path P             which rules cover a path (the hook's own matching)
+  add    --glob G [--glob G]  create a rule; markdown body read from stdin
+         [--rule N] [--force] [--reinforce N|never]
+  update --rule N             replace a rule's body (stdin), keeping its globs
+  remove --rule N | --glob G  delete a rule file
+  validate                    check every rule: frontmatter, globs, size, safety
+  migrate                     convert a legacy rules-map.yml scope to this format
 
 Scope: --root <project-root> (project) or --global (~/.claude).
-
-Every write is refused when the map cannot be parsed, and the map is replaced
-atomically — a management tool that silently truncates a user's rules is worse
-than one that refuses to run.
 """
 
 import argparse
-import json
 import os
 import sys
 import tempfile
 
 RULES_DIR_RELPATH = os.path.join(".claude", "rules-by-path")
-MAP_FILE_NAME = "rules-map.yml"
-RULES_SUBDIR_NAME = "rules"
+LEGACY_MAP_NAME = "rules-map.yml"
+LEGACY_RULES_SUBDIR = "rules"
 HOOK_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "hooks", "rules-by-path.py")
-
-HEADER_PROJECT = """\
-# rules-by-path — glob-to-rule map (scope: project).
-# Injected by the rules-by-path plugin's PreToolUse hook whenever Claude
-# touches a file matching a glob. Manage it via the `rules-by-path:manage`
-# skill — never by hand-editing this file.
-#
-# Project scope: globs are relative to the project root (the folder containing .claude/).
-#   - "src/api/**"     -> anything under src/api/
-#   - "docs"           -> the docs/ folder and everything below
-#   - "*.tf"           -> a glob without '/' also matches the basename
-# Entry format:
-#   - glob: "src/api/**"        # required
-#     rule: "src--api.md"       # optional; default: glob with '/' -> '--' (+ '.md' unless already present)
-rules:
-"""
-
-HEADER_GLOBAL = """\
-# rules-by-path — GLOBAL glob-to-rule map (applies to every project).
-# Injected by the rules-by-path plugin's PreToolUse hook whenever Claude
-# touches a file matching a glob. Manage it via the `rules-by-path:manage`
-# skill — never by hand-editing this file.
-#
-# Global scope: globs match the file's ABSOLUTE path.
-#   - "**/terraform/**"  -> any terraform folder anywhere
-#   - "*.tf"             -> a glob without '/' also matches the basename
-#   - "/repos/x/**"      -> absolute-path prefix
-# Entry format:
-#   - glob: "**/deploy/**"      # required
-#     rule: "deploy.md"         # optional; default: glob with '/' -> '--' (+ '.md' unless already present)
-rules:
-"""
 
 
 def fail(message):
@@ -77,9 +42,13 @@ def fail(message):
     sys.exit(1)
 
 
+def warn(message):
+    print(f"rules-by-path-admin: {message}", file=sys.stderr)
+
+
 def load_hook_module():
-    """Import the plugin's hook so glob matching, map parsing, name derivation
-    and containment are the exact code the injection uses — a second
+    """Import the plugin's hook so glob matching, frontmatter parsing, name
+    derivation and containment are the exact code the injection uses — a second
     implementation here is how the two drift apart and a guard goes missing."""
     import importlib.machinery
     import importlib.util
@@ -95,82 +64,22 @@ def load_hook_module():
 HOOK = load_hook_module()
 
 
-def derive_rule_name(glob):
-    return HOOK.derive_rule_name(glob)
-
-
-def is_valid_rule_name(rule_name):
-    return HOOK.is_valid_rule_name(rule_name)
-
-
-def paths_for(args):
+def scope_for(args):
+    """(scope_dir, anchor). The scope must physically live inside the root the
+    caller named: without that check, a cloned repo shipping `.claude` or
+    `.claude/rules-by-path` as a symlink redirects every read, write and delete
+    — a project-scoped add would land in the user's global rules."""
     if args.use_global:
         anchor = os.path.expanduser("~")
-        header = HEADER_GLOBAL
     else:
         anchor = os.path.abspath(args.root)
         if not os.path.isdir(anchor):
             fail(f"project root does not exist: {anchor}")
-        header = HEADER_PROJECT
-    base = os.path.join(anchor, RULES_DIR_RELPATH)
-    # The scope directory must physically live under the root the caller named.
-    # Without this, a cloned repo shipping `.claude/rules-by-path` as a symlink
-    # redirects every read, write and delete — a project-scoped `add` would
-    # land in the user's GLOBAL rules and apply to every project forever.
-    if not HOOK.scope_is_contained(anchor, base):
-        fail(f"{base} does not physically live inside {anchor} (symlink?); refusing to touch it")
-    return base, os.path.join(base, MAP_FILE_NAME), os.path.join(base, RULES_SUBDIR_NAME), header, anchor
-
-
-def safe_rules_dir(map_path, rules_dir, anchor):
-    """The rules directory, verified to be a real directory inside the scope.
-    Refusing here is what stops a cloned repo from steering writes and unlinks
-    through a symlinked `rules/`."""
-    if not os.path.exists(rules_dir):
-        return rules_dir  # not created yet; makedirs will create a real dir
-    resolved = HOOK.resolve_rules_dir(map_path, anchor)
-    if resolved is None:
-        fail(f"{rules_dir} is not a real directory inside the scope (symlink?); refusing to touch it")
-    return resolved
-
-
-def load_entries(map_path):
-    """Entries for a command that WRITES. Aborts on anything not fully
-    understood, so a read-modify-write cannot wipe or mangle the map, and so a
-    hostile rule name never reaches a filesystem call."""
-    if not os.path.isfile(map_path):
-        return []
-    try:
-        return HOOK.load_raw_entries(map_path, strict=True)
-    except HOOK.MapParseError as exc:
-        fail(f"{exc}\nrefusing to write: fix or delete the map first, "
-             f"otherwise this command would discard every entry in it")
-
-
-def load_entries_reporting(map_path):
-    """(entries, parse_error). `validate` exists to detect breakage, so it must
-    surface a map it could not parse rather than treating it as empty."""
-    if not os.path.isfile(map_path):
-        return [], None
-    # `validate` exists to detect breakage, so it uses the strict posture: a
-    # line this code could not understand is a problem to report, not to skip.
-    try:
-        return HOOK.load_raw_entries(map_path, strict=True), None
-    except HOOK.MapParseError as exc:
-        return [], str(exc)
-
-
-def load_entries_lenient(map_path):
-    """Entries for a read-only command. Reports what it could not parse instead
-    of refusing — a user whose map has one bad line still needs to be able to
-    list it and find out what is wrong."""
-    if not os.path.isfile(map_path):
-        return []
-    try:
-        return HOOK.load_raw_entries(map_path, strict=False)
-    except HOOK.MapParseError as exc:
-        print(f"rules-by-path-admin: {exc}", file=sys.stderr)
-        return []
+    scope_dir = os.path.join(anchor, RULES_DIR_RELPATH)
+    if not HOOK.scope_is_contained(anchor, scope_dir):
+        fail(f"{scope_dir} does not physically live inside {anchor} (symlink?); "
+             f"refusing to touch it")
+    return scope_dir, anchor
 
 
 def atomic_write(path, text):
@@ -199,285 +108,382 @@ def atomic_write(path, text):
         raise
 
 
-def write_map(map_path, header, entries):
-    lines = [header]
-    for entry in entries:
-        # json.dumps produces a valid YAML double-quoted scalar, so a glob
-        # containing a quote, backslash or '#' round-trips intact.
-        # ensure_ascii=False keeps non-ASCII globs literal: the \uXXXX escapes
-        # json.dumps emits by default are decoded by PyYAML but not by the
-        # fallback parser, so an accented glob would stop matching without it.
-        lines.append(f"  - glob: {json.dumps(entry['glob'], ensure_ascii=False)}\n")
-        if entry["rule"]:
-            lines.append(f"    rule: {json.dumps(entry['rule'], ensure_ascii=False)}\n")
-    atomic_write(map_path, "".join(lines))
+def rules_in(scope_dir):
+    """[(name, fields, body)] for every rule in a scope, sorted by name."""
+    rules = []
+    for name, _fields in HOOK.scope_index(scope_dir):
+        result = HOOK.read_rule_file(scope_dir, name)
+        if result is not None:
+            rules.append((name, result[0], result[1]))
+    return rules
 
 
-def resolved_rule(entry):
-    return entry["rule"] or derive_rule_name(entry["glob"])
+def render_rule(globs, body, reinforce=None):
+    lines = ["---"]
+    if len(globs) == 1:
+        lines.append(f"glob: {globs[0]}")
+    else:
+        lines.append("glob:")
+        lines.extend(f"  - {glob}" for glob in globs)
+    if reinforce:
+        lines.append(f"reinforce: {reinforce}")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines) + body.strip() + "\n"
+
+
+def rule_path(scope_dir, name):
+    if not HOOK.is_valid_rule_name(name):
+        fail(f"invalid rule name (plain, short '*.md' file names only): {name[:80]!r}")
+    return os.path.join(scope_dir, name)
 
 
 def cmd_init(args):
-    base, map_path, rules_dir, header, anchor = paths_for(args)
-    os.makedirs(rules_dir, exist_ok=True)
-    write_map(map_path, header, load_entries(map_path))
-    print(f"ok: skeleton ready at {base}")
+    scope_dir, _ = scope_for(args)
+    os.makedirs(scope_dir, exist_ok=True)
+    print(f"ok: scope ready at {scope_dir}")
+
+
+def cmd_list(args):
+    scope_dir, _ = scope_for(args)
+    if not os.path.isdir(scope_dir):
+        print("(no rules in this scope)")
+        return
+    rules = rules_in(scope_dir)
+    if not rules:
+        print("(no rules in this scope)")
+    for name, fields, _body in rules:
+        globs = HOOK.globs_of(fields)
+        shown = ", ".join(globs) if globs else "(NO GLOB — never injected)"
+        print(f"{name}  <-  {shown}")
+    if HOOK.has_legacy_map(scope_dir):
+        print("\nWARNING: a legacy rules-map.yml is present and is NOT being used. "
+              "Run `migrate` to convert it.")
+
+
+def cmd_show(args):
+    scope_dir, _ = scope_for(args)
+    path = rule_path(scope_dir, args.rule)
+    if os.path.islink(path) or not os.path.isfile(path):
+        fail(f"no such rule in this scope: {args.rule}")
+    # Read the file whole: `show` feeds the show -> edit -> update round trip,
+    # so truncating here would silently destroy the tail of a long rule.
+    with open(path, encoding="utf-8") as handle:
+        sys.stdout.write(handle.read())
 
 
 def cmd_which(args):
-    base, map_path, rules_dir, _, anchor = paths_for(args)
+    scope_dir, anchor = scope_for(args)
     if args.use_global:
         abs_path = os.path.abspath(args.path)
         rel_path = None
         shown = abs_path
     else:
-        root = os.path.abspath(args.root)
-        abs_path = args.path if os.path.isabs(args.path) else os.path.join(root, args.path)
+        abs_path = args.path if os.path.isabs(args.path) else os.path.join(anchor, args.path)
         abs_path = os.path.normpath(abs_path)
-        rel_path = os.path.relpath(abs_path, root).replace(os.sep, "/")
+        rel_path = os.path.relpath(abs_path, anchor).replace(os.sep, "/")
         if rel_path.startswith(".."):
-            fail(f"path outside the root {root}: {abs_path}")
+            fail(f"path outside the root {anchor}: {abs_path}")
         shown = rel_path
     abs_posix = abs_path.replace(os.sep, "/")
-    entries = load_entries_lenient(map_path)
-    # A folder query ("--path docs") must also find entries like 'docs/**',
-    # which only match paths INSIDE the folder — probe with a synthetic child.
-    # A path that does not exist yet and has no file extension is treated as a
-    # folder: asking about a folder you are about to create is the normal case
-    # when registering a rule, and it used to report a spurious "no match".
+
+    # A folder query must also find globs like 'docs/**', which only match
+    # paths INSIDE the folder — probe with a synthetic child.
     looks_like_a_file = "." in os.path.basename(abs_path.rstrip("/"))
     is_dir_query = (os.path.isdir(abs_path) or args.path.endswith("/")
                     or (not os.path.exists(abs_path) and not looks_like_a_file))
     targets = [(rel_path, abs_posix)]
     if is_dir_query:
-        child = "__probe__"
-        targets.append((None if rel_path is None else f"{rel_path.rstrip('/')}/{child}",
-                        f"{abs_posix.rstrip('/')}/{child}"))
-    matches = [e for e in entries
-               if any(HOOK.glob_matches(e["glob"], r, a) for r, a in targets)]
+        targets.append((None if rel_path is None else f"{rel_path.rstrip('/')}/__probe__",
+                        f"{abs_posix.rstrip('/')}/__probe__"))
 
-    if args.json:
-        print(json.dumps({
-            "path": shown,
-            "matches": [{"glob": e["glob"], "rule": resolved_rule(e),
-                         "present": os.path.isfile(os.path.join(rules_dir, resolved_rule(e)))}
-                        for e in matches],
-        }, ensure_ascii=False, indent=2))
+    matches = []
+    if os.path.isdir(scope_dir):
+        for name, fields, _body in rules_in(scope_dir):
+            for glob in HOOK.globs_of(fields):
+                if any(HOOK.glob_matches(glob, r, a) for r, a in targets):
+                    matches.append(name)
+                    break
+    for name in matches:
+        print(f"match: rule {name}")
+    if matches:
         return
 
-    for entry in matches:
-        rule_name = resolved_rule(entry)
-        gone = "" if os.path.isfile(os.path.join(rules_dir, rule_name)) else "  (rule MISSING)"
-        print(f"match: rule {rule_name}{gone}")
-    if not matches:
-        scope_flag = "--global" if args.use_global else "--root <root>"
-        if os.path.isdir(abs_path) or args.path.endswith("/"):
-            suggestions = [f"{shown.rstrip('/')}/**"]
-        elif not os.path.exists(abs_path) and not looks_like_a_file:
-            # Could be a folder or an extension-less file; suggesting only the
-            # folder form yields a rule that never fires for the file case.
-            suggestions = [f"{shown.rstrip('/')}/**", shown]
-        else:
-            parent = os.path.dirname(shown).replace(os.sep, "/")
-            suggestions = [f"{parent}/**" if parent and parent != "/" else shown]
-        print(f"no entry covers '{shown}' — to create one:")
-        for suggestion in suggestions:
-            print(f"  add {scope_flag} --glob '{suggestion}'")
+    scope_flag = "--global" if args.use_global else "--root <root>"
+    if os.path.isdir(abs_path) or args.path.endswith("/"):
+        suggestions = [f"{shown.rstrip('/')}/**"]
+    elif not os.path.exists(abs_path) and not looks_like_a_file:
+        # Could be a folder or an extension-less file; suggesting only the
+        # folder form yields a rule that never fires for the file case.
+        suggestions = [f"{shown.rstrip('/')}/**", shown]
+    else:
+        parent = os.path.dirname(shown).replace(os.sep, "/")
+        suggestions = [f"{parent}/**" if parent and parent != "/" else shown]
+    print(f"no rule covers '{shown}' — to create one:")
+    for suggestion in suggestions:
+        print(f"  add {scope_flag} --glob '{suggestion}'")
 
 
-def cmd_list(args):
-    _, map_path, rules_dir, _, anchor = paths_for(args)
-    if not os.path.isfile(map_path):
-        print("(no rules-map.yml in this scope)")
-        return
-    entries = load_entries_lenient(map_path)
-    if not entries:
-        print("(no rules registered in this scope)")
-    for entry in entries:
-        rule_name = resolved_rule(entry)
-        gone = "" if os.path.isfile(os.path.join(rules_dir, rule_name)) else "  (rule MISSING)"
-        print(f"{entry['glob']}  ->  {rule_name}{gone}")
-
-
-def cmd_show(args):
-    base, map_path, rules_dir, _, anchor = paths_for(args)
-    if not is_valid_rule_name(args.rule):
-        fail(f"invalid rule name: {args.rule!r}")
-    rules_dir = HOOK.resolve_rules_dir(map_path, anchor)
-    if rules_dir is None:
-        fail("the rules/ directory is not a real directory inside the scope")
-    path = os.path.join(rules_dir, args.rule)
-    if os.path.islink(path) or not os.path.isfile(path):
-        fail(f"cannot read rule {args.rule!r} in this scope")
-    # Read the file whole. The hook truncates at 16k for context budget, but
-    # `show` feeds the show -> edit -> update round trip: truncating here would
-    # silently destroy the tail of a long rule on the next update.
-    with open(path, encoding="utf-8") as handle:
-        sys.stdout.write(handle.read())
+def warn_if_long(name, body):
+    if len(body) > HOOK.RULE_WARN_CHARS:
+        warn(f"{name} is {len(body)} chars; a rule should state constraints, not "
+             f"document behaviour (soft limit {HOOK.RULE_WARN_CHARS}, hard "
+             f"truncation at {HOOK.MAX_RULE_CHARS})")
 
 
 def cmd_add(args):
-    base, map_path, rules_dir, header, anchor = paths_for(args)
-    content = sys.stdin.read().strip()
-    if not content:
+    scope_dir, _ = scope_for(args)
+    body = sys.stdin.read().strip()
+    if not body:
         fail("empty rule content — send the markdown via stdin")
-    rule_name = args.rule or derive_rule_name(args.glob)
-    if not is_valid_rule_name(rule_name):
-        fail(f"invalid rule name ({rule_name!r}); pass a clean name via --rule, "
-             f"e.g. --rule csharp-files.md")
-    entries = load_entries(map_path)
-    existing = next((e for e in entries if e["glob"] == args.glob), None)
-    if existing and not args.force:
-        fail(f"glob already registered (rule '{resolved_rule(existing)}'); use --force to overwrite")
-    collision = next((e for e in entries
-                      if e["glob"] != args.glob and resolved_rule(e) == rule_name), None)
-    if collision:
-        fail(f"the file {rule_name} already belongs to another glob — "
-             f"update it with `update --rule {rule_name}`, or pass a different --rule")
-    rules_dir = safe_rules_dir(map_path, rules_dir, anchor)
-    os.makedirs(rules_dir, exist_ok=True)
-    old_name = None
-    if existing:
-        old_name = resolved_rule(existing)
-        existing["rule"] = rule_name
-    else:
-        entries.append({"glob": args.glob, "rule": rule_name})
-    # Write the replacement and commit the map BEFORE removing the old file:
-    # unlinking first destroys content whenever a later step refuses to run.
-    write_rule_file(rules_dir, rule_name, content)
-    write_map(map_path, header, entries)
-    if old_name and old_name != rule_name:
-        unlink_rule_file(rules_dir, old_name)
-    print(f"ok: registered -> {rule_name}")
-    validate(base, map_path, anchor)
+    globs = [g.strip() for g in args.glob if g.strip()]
+    if not globs:
+        fail("'add' requires at least one --glob")
+    name = args.rule or HOOK.derive_rule_name(globs[0])
+    if not HOOK.is_valid_rule_name(name):
+        source = "invalid rule name" if args.rule else \
+            f"the name derived from {globs[0]!r} is not usable"
+        fail(f"{source}: {name[:60]!r} — pass a plain one, e.g. --rule csharp.md")
+    path = rule_path(scope_dir, name)
+    if os.path.exists(path) and not args.force:
+        fail(f"{name} already exists in this scope; use --force to overwrite, "
+             f"`update --rule {name}` to replace its body, or pass another --rule")
+    os.makedirs(scope_dir, exist_ok=True)
+    atomic_write(path, render_rule(globs, body, args.reinforce))
+    print(f"ok: {name}  <-  {', '.join(globs)}")
+    warn_if_long(name, body)
+    validate_scope(scope_dir, quiet=True)
 
 
 def cmd_update(args):
-    base, map_path, rules_dir, header, anchor = paths_for(args)
-    content = sys.stdin.read().strip()
-    if not content:
+    scope_dir, _ = scope_for(args)
+    body = sys.stdin.read().strip()
+    if not body:
         fail("empty rule content — send the markdown via stdin")
-    if not is_valid_rule_name(args.rule):
-        fail(f"invalid rule name: {args.rule!r}")
-    entries = load_entries(map_path)
-    if not any(resolved_rule(e) == args.rule for e in entries):
-        fail(f"no entry uses the rule file {args.rule!r} — register it with `add --glob ...`")
-    rules_dir = safe_rules_dir(map_path, rules_dir, anchor)
-    write_rule_file(rules_dir, args.rule, content)
+    path = rule_path(scope_dir, args.rule)
+    if os.path.islink(path) or not os.path.isfile(path):
+        fail(f"no such rule in this scope: {args.rule}")
+    result = HOOK.read_rule_file(scope_dir, args.rule)
+    if result is None:
+        fail(f"cannot read {args.rule}")
+    fields = result[0]
+    globs = [g.strip() for g in args.glob if g.strip()] or HOOK.globs_of(fields)
+    if not globs:
+        fail(f"{args.rule} declares no glob; pass --glob to set one")
+    reinforce = args.reinforce or fields.get("reinforce") or None
+    if isinstance(reinforce, list):
+        reinforce = reinforce[0] if reinforce else None
+    atomic_write(path, render_rule(globs, body, reinforce))
     print(f"ok: updated {args.rule}")
-    validate(base, map_path, anchor)
-
-
-def write_rule_file(rules_dir, rule_name, content):
-    if not is_valid_rule_name(rule_name):
-        fail(f"invalid rule name: {rule_name!r}")
-    atomic_write(os.path.join(rules_dir, rule_name), content + "\n")
-
-
-def unlink_rule_file(rules_dir, rule_name):
-    """Delete a rule file, but only when the name is one we would have written.
-
-    Rule names come out of the map, which is repository data. An absolute name
-    makes os.path.join discard rules_dir entirely, and '../' walks out of the
-    scope — either one turns a rename into arbitrary file deletion."""
-    if not is_valid_rule_name(rule_name):
-        warn(f"refusing to delete {rule_name!r}: not a plain '*.md' file name")
-        return
-    path = os.path.join(rules_dir, rule_name)
-    if os.path.islink(path):
-        warn(f"refusing to delete {rule_name}: it is a symlink")
-        return
-    if os.path.isfile(path):
-        os.unlink(path)
-
-
-def warn(message):
-    print(f"rules-by-path-admin: {message}", file=sys.stderr)
+    warn_if_long(args.rule, body)
+    validate_scope(scope_dir, quiet=True)
 
 
 def cmd_remove(args):
-    base, map_path, rules_dir, header, anchor = paths_for(args)
-    entries = load_entries(map_path)
-    # Removing by rule NAME is the safe path when the glob came out of the map
-    # (repository data); removing by glob is for a glob the user just named.
-    if args.rule:
-        target = next((e for e in entries if resolved_rule(e) == args.rule), None)
-        if target is None:
-            fail(f"no entry uses the rule file {args.rule!r}")
-    else:
-        target = next((e for e in entries if e["glob"] == args.glob), None)
-        if target is None:
-            fail(f"glob not registered: {args.glob!r}")
-    kept = [e for e in entries if e is not target]
-    rule_name = resolved_rule(target)
-    rules_dir = safe_rules_dir(map_path, rules_dir, anchor)
-    write_map(map_path, header, kept)
-    still_used = any(resolved_rule(e) == rule_name for e in kept)
-    if not still_used:
-        unlink_rule_file(rules_dir, rule_name)
-    print(f"ok: removed entry (rule {rule_name}"
-          f"{' kept, used by another glob' if still_used else ' deleted'})")
-    validate(base, map_path, anchor)
+    scope_dir, _ = scope_for(args)
+    name = args.rule
+    if not name:
+        matches = [n for n, fields, _ in rules_in(scope_dir)
+                   if args.glob in HOOK.globs_of(fields)]
+        if not matches:
+            fail(f"no rule declares the glob {args.glob!r}")
+        if len(matches) > 1:
+            fail(f"{len(matches)} rules declare that glob ({', '.join(matches)}); "
+                 f"pick one with --rule")
+        name = matches[0]
+    path = rule_path(scope_dir, name)
+    if os.path.islink(path):
+        fail(f"{name} is a symlink; refusing to delete through it")
+    if not os.path.isfile(path):
+        fail(f"no such rule in this scope: {name}")
+    os.unlink(path)
+    print(f"ok: removed {name}")
 
 
-def validate(base, map_path, anchor):
+def validate_scope(scope_dir, quiet=False):
+    """Print notes and errors; return the number of errors. Notes are advice
+    (a long rule, a shared glob); errors mean something will not work."""
+    if not os.path.isdir(scope_dir):
+        if not quiet:
+            print("(no rules in this scope — nothing to validate)")
+        return 0
     problems = []
-    entries, parse_error = load_entries_reporting(map_path)
-    if parse_error:
-        problems.append(f"map cannot be parsed: {parse_error}")
-    rules_dir = HOOK.resolve_rules_dir(map_path, anchor)
-    if rules_dir is None and entries:
-        fail("the rules/ directory is not a real directory inside the scope (symlink?)")
-    for entry in entries:
-        rule_name = resolved_rule(entry)
-        if not is_valid_rule_name(rule_name):
-            problems.append(f"invalid rule name for a registered glob: {rule_name!r}")
-            continue
-        path = os.path.join(base, RULES_SUBDIR_NAME, rule_name)
-        if not os.path.isfile(path):
-            problems.append(f"missing rule file: {rule_name}")
-    if problems:
-        for problem in problems:
-            print(f"ERROR: {problem}", file=sys.stderr)
-        sys.exit(1)
-    print(f"validation ok: {len(entries)} entrie(s)")
+    notes = []
+    if HOOK.has_legacy_map(scope_dir):
+        problems.append(f"a legacy {LEGACY_MAP_NAME} is present and is NOT used; "
+                        f"run `migrate` to convert it")
+    rules = rules_in(scope_dir)
+    by_glob = {}
+    total = 0
+    for name, fields, body in rules:
+        globs = HOOK.globs_of(fields)
+        if not globs:
+            problems.append(f"{name}: no glob declared, so it can never be injected")
+        for glob in globs:
+            by_glob.setdefault(glob, []).append(name)
+        if not body:
+            problems.append(f"{name}: empty body")
+        total += len(body)
+        if len(body) > HOOK.RULE_WARN_CHARS:
+            notes.append(f"{name}: {len(body)} chars — a rule should state "
+                         f"constraints, not document behaviour (soft limit "
+                         f"{HOOK.RULE_WARN_CHARS}, truncated at {HOOK.MAX_RULE_CHARS})")
+        unknown = set(fields) - {"glob", "globs", "reinforce", "description"}
+        if unknown:
+            notes.append(f"{name}: unknown frontmatter key(s): "
+                         f"{', '.join(sorted(unknown))}")
+    for glob, names in sorted(by_glob.items()):
+        if len(names) > 1:
+            notes.append(f"{len(names)} rules share the glob {glob!r} "
+                         f"({', '.join(names)}) — they all inject together")
+    if total > HOOK.MAX_TOTAL_CHARS:
+        notes.append(f"rules total {total} chars; one injection is capped at "
+                     f"{HOOK.MAX_TOTAL_CHARS}, so a file matching many of them "
+                     f"gets the rest on later tool calls")
+    for note in notes:
+        print(f"note: {note}")
+    for problem in problems:
+        print(f"ERROR: {problem}", file=sys.stderr)
+    if not quiet and not problems:
+        print(f"validation ok: {len(rules)} rule(s)")
+    return len(problems)
 
 
 def cmd_validate(args):
-    base, map_path, _, _, anchor = paths_for(args)
+    scope_dir, _ = scope_for(args)
+    if validate_scope(scope_dir):
+        sys.exit(1)
+
+
+def read_legacy_map(map_path):
+    """[(glob, rule_name)] from a legacy map. Tolerant by design: this runs
+    once, and refusing to migrate a slightly odd map helps nobody."""
+    try:
+        with open(map_path, encoding="utf-8") as handle:
+            lines = handle.read().split("\n")
+    except OSError as exc:
+        fail(f"cannot read {map_path}: {exc}")
+    entries = []
+    pending = None
+    for raw in lines:
+        stripped = "" if raw.lstrip().startswith("#") else raw.split("#", 1)[0].strip()
+        if not stripped or stripped.startswith("rules:"):
+            continue
+        if stripped.startswith("- glob:"):
+            if pending:
+                entries.append((pending, HOOK.derive_rule_name(pending)))
+            pending = HOOK.unquote(stripped[len("- glob:"):])
+        elif stripped.startswith("rule:") and pending:
+            entries.append((pending, HOOK.unquote(stripped[len("rule:"):])))
+            pending = None
+        elif stripped.startswith("- "):
+            if pending:
+                entries.append((pending, HOOK.derive_rule_name(pending)))
+                pending = None
+            glob = HOOK.unquote(stripped[2:])
+            entries.append((glob, HOOK.derive_rule_name(glob)))
+    if pending:
+        entries.append((pending, HOOK.derive_rule_name(pending)))
+    return entries
+
+
+def cmd_migrate(args):
+    """Convert a legacy `rules-map.yml` + `rules/` scope into one file per rule.
+
+    The old map is parsed here rather than in the hook: keeping a YAML parser
+    alive in the injection path for a one-time job would be a permanent cost,
+    and two parsers for one format is exactly what this format change removes."""
+    scope_dir, _ = scope_for(args)
+    map_path = os.path.join(scope_dir, LEGACY_MAP_NAME)
+    legacy_dir = os.path.join(scope_dir, LEGACY_RULES_SUBDIR)
     if not os.path.isfile(map_path):
-        print("(no rules-map.yml in this scope — nothing to validate)")
+        print("nothing to migrate: no legacy rules-map.yml in this scope")
         return
-    validate(base, map_path, anchor)
+    entries = read_legacy_map(map_path)
+    if not entries:
+        fail("the legacy map has no readable entries; migrate it by hand")
+
+    by_name = {}
+    for glob, name in entries:
+        by_name.setdefault(name, [])
+        if glob not in by_name[name]:
+            by_name[name].append(glob)
+
+    written, skipped = [], []
+    for name, globs in by_name.items():
+        if not HOOK.is_valid_rule_name(name):
+            skipped.append(f"{name[:60]!r}: not a usable rule file name")
+            continue
+        source = os.path.join(legacy_dir, name)
+        if os.path.islink(source) or not os.path.isfile(source):
+            skipped.append(f"{name}: rule file missing in {LEGACY_RULES_SUBDIR}/")
+            continue
+        with open(source, encoding="utf-8") as handle:
+            body = handle.read().strip()
+        if not body:
+            skipped.append(f"{name}: empty")
+            continue
+        target = os.path.join(scope_dir, name)
+        if os.path.exists(target) and not args.force:
+            skipped.append(f"{name}: already exists in the new format (use --force)")
+            continue
+        atomic_write(target, render_rule(globs, body))
+        written.append(f"{name}  <-  {', '.join(globs)}")
+
+    for line in written:
+        print(f"ok: {line}")
+    for line in skipped:
+        warn(f"skipped {line}")
+    if not written:
+        fail("nothing was migrated; the legacy files were left untouched")
+    if skipped and not args.force:
+        warn("legacy files kept because some entries were skipped; "
+             "re-run with --force once you have reviewed them")
+        return
+    os.unlink(map_path)
+    for name in by_name:
+        stale = os.path.join(legacy_dir, name)
+        if os.path.isfile(stale) and not os.path.islink(stale):
+            os.unlink(stale)
+    try:
+        os.rmdir(legacy_dir)
+    except OSError:
+        warn(f"{legacy_dir} is not empty; left in place for you to review")
+    print(f"migrated {len(written)} rule(s); the legacy map was removed")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("command", choices=["init", "list", "show", "which", "add",
-                                            "update", "remove", "validate"])
+                                            "update", "remove", "validate", "migrate"])
     scope = parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--root", help="project root (the folder containing .claude/)")
     scope.add_argument("--global", dest="use_global", action="store_true",
                        help="global scope (~/.claude/rules-by-path)")
-    parser.add_argument("--glob", help="rule glob (add/remove)")
-    parser.add_argument("--rule", help="rule file name (add/update/show)")
-    parser.add_argument("--force", action="store_true", help="overwrite an existing entry (add)")
+    parser.add_argument("--glob", action="append", default=[],
+                        help="glob the rule applies to; repeat for several")
+    parser.add_argument("--rule", help="rule file name")
+    parser.add_argument("--reinforce", help="reminder interval in tool calls, or 'never'")
+    parser.add_argument("--force", action="store_true", help="overwrite an existing rule")
     parser.add_argument("--path", help="file/folder to resolve (which)")
-    parser.add_argument("--json", action="store_true", help="machine-readable output (which)")
     args = parser.parse_args()
+
     if args.command == "add" and not args.glob:
         fail("'add' requires --glob")
-    if args.command == "remove" and not (args.glob or args.rule):
-        fail("'remove' requires --glob or --rule")
-    if args.command == "remove" and args.glob and args.rule:
-        fail("'remove' takes --glob OR --rule, not both")
     if args.command in ("show", "update") and not args.rule:
         fail(f"'{args.command}' requires --rule")
+    if args.command == "remove" and not (args.rule or args.glob):
+        fail("'remove' requires --rule or --glob")
+    if args.command == "remove" and args.rule and args.glob:
+        fail("'remove' takes --rule OR --glob, not both")
+    if args.command == "remove" and args.glob:
+        args.glob = args.glob[0]
     if args.command == "which" and not args.path:
         fail("'which' requires --path")
+
     {"init": cmd_init, "list": cmd_list, "show": cmd_show, "which": cmd_which,
      "add": cmd_add, "update": cmd_update, "remove": cmd_remove,
-     "validate": cmd_validate}[args.command](args)
+     "validate": cmd_validate, "migrate": cmd_migrate}[args.command](args)
 
 
 if __name__ == "__main__":

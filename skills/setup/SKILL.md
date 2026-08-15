@@ -56,6 +56,20 @@ Only if the user wants machine-wide rules:
 
 Project scopes are created implicitly by the first `add --root <root>`.
 
+## 3b. Reinforcement interval (optional)
+
+A rule is injected in full once per session, then repeated as a one-line
+reminder every 25 tool calls. On very long contexts a shorter interval keeps
+rules present; on short sessions it is noise. To change it globally, add to
+`~/.claude/settings.json`:
+
+```json
+"env": { "RULES_BY_PATH_REINFORCE_EVERY": "25" }
+```
+
+`0` disables reinforcement. A single rule can override it with `reinforce:` in
+its frontmatter (a number, or `never`).
+
 ## 4. Recommended hardening (ASK FIRST — edits user settings)
 
 By default nothing stops the file tools from reading or editing rule files
@@ -83,9 +97,24 @@ Be explicit about the trade-off so it is an informed choice:
 - Removing the plugin later without removing these entries leaves those paths
   unreadable — section 6 undoes it.
 
-## 5. Migration from a manual (pre-plugin) installation
+## 5. Migrating existing rules
 
-Only relevant if the user installed rules-by-path by hand before. Check:
+**Rule format.** Rules used to live in a `rules-map.yml` index plus a `rules/`
+folder; now each rule is a single markdown file declaring its own glob. A scope
+still in the old shape injects NOTHING, and the hook says so in context. Check
+and convert both scopes:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" migrate --global
+"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" migrate --root "<project-root>"
+```
+
+`migrate` converts every entry, then removes the legacy map — unless something
+could not be converted, in which case it keeps everything and tells you what to
+resolve. Run `validate` afterwards.
+
+**Manual (pre-plugin) installation.** Only if the user installed rules-by-path
+by hand before there was a plugin:
 
 ```bash
 ls ~/.claude/hooks/rules-by-path.py ~/.claude/scripts/rules-by-path-admin.py ~/.claude/skills/rules-by-path 2>/dev/null
@@ -94,9 +123,7 @@ grep -n '"command".*rules-by-path' ~/.claude/settings.json 2>/dev/null | head
 
 If found, with the user's consent: remove from `~/.claude/settings.json` the
 `hooks` entries that invoke `~/.claude/hooks/rules-by-path.py` (otherwise rules
-inject twice), then delete the old hook/script/skill files. Existing rule DATA
-(`~/.claude/rules-by-path/`, `<project>/.claude/rules-by-path/`) needs no
-migration — the plugin reads the same locations and format.
+inject twice), then delete the old hook/script/skill files.
 
 ## 6. Uninstall / undo
 

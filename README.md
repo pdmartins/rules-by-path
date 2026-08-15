@@ -16,13 +16,14 @@ repo, and the guidance still isn't tied to what the agent actually touches.
 
 `rules-by-path` inverts this:
 
-- You register a **glob → markdown rule** mapping (`src/api/** → src--api.md`).
+- A rule is one markdown file that declares the glob it applies to, in its own
+  frontmatter. There is no index to keep in sync.
 - A `PreToolUse` hook watches `Read`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`.
-- The first time Claude touches a matching file, the rule's markdown is
-  injected into context (`additionalContext`) — clearly labeled with its glob
-  and scope.
-- Injection happens **once per rule per session** (state resets automatically
-  after `/clear` and context compaction, so rules survive both).
+- The first time Claude touches a matching file, the rule is injected into
+  context (`additionalContext`) — labeled with its glob and scope.
+- Injection happens **once per rule version per session**, then a one-line
+  **reminder** every N tool calls, so a rule does not fade out of a very long
+  context. Editing a rule re-injects it in full immediately.
 - Zero context cost for rules that never become relevant.
 
 The hook also **blocks the creation of nested `CLAUDE.md` files** inside a
@@ -42,10 +43,8 @@ Then run `/rules-by-path:setup` once — it checks prerequisites, smoke-tests
 the hook, and offers the recommended permission hardening.
 
 **Requirements:** Python 3.8+ on `PATH` as `python3`, `python` or (Windows)
-the `py` launcher — stdlib only, no packages to install. PyYAML is optional:
-without it a built-in parser handles the map format the plugin itself writes.
-Tested on Linux and macOS; Windows support is implemented but not yet verified
-by the author.
+the `py` launcher. Standard library only — nothing to install. Tested on Linux
+and macOS; Windows support is implemented but not yet verified by the author.
 
 ## Quick start
 
@@ -54,15 +53,22 @@ Just ask Claude, in any language:
 > "Add a rule for `src/api`: every endpoint needs input validation and must
 > return ProblemDetails on errors."
 
-The `rules-by-path:manage` skill registers it:
+The `rules-by-path:manage` skill writes one file:
 
 ```
 .claude/rules-by-path/
-├── rules-map.yml          # - glob: "src/api/**"
-│                          #   rule: "src--api.md"
-└── rules/
-    └── src--api.md        # your markdown rule
+└── src--api.md
 ```
+
+```markdown
+---
+glob: src/api/**
+---
+Every endpoint validates its input and returns ProblemDetails on error.
+```
+
+A rule can declare several globs, and several rules can share one glob — they
+all inject together.
 
 From then on, whenever Claude touches anything under `src/api/`, the rule
 appears in its context — once per session, exactly when it matters.
@@ -82,6 +88,23 @@ repository root. Your global rules are budgeted first, so rules arriving with a
 cloned repo can never crowd them out. Project rules are committed with the
 repo, so the whole team shares them.
 
+## Reinforcement
+
+A rule is injected in full the first time it is relevant, then repeated as a
+one-line reminder every 25 tool calls. On a long-context session a rule
+injected hundreds of thousands of tokens ago has effectively faded; a short
+reminder costs little and keeps it live.
+
+Set the interval with `RULES_BY_PATH_REINFORCE_EVERY` (`0` disables it), or per
+rule with `reinforce:` in its frontmatter:
+
+```markdown
+---
+glob: infra/**
+reinforce: never
+---
+```
+
 ## Glob semantics
 
 | Glob | Matches |
@@ -99,17 +122,18 @@ repo, so the whole team shares them.
 - **Never blocks work**: any internal hook failure goes to stderr and the tool
   call proceeds untouched. The only deliberate block is the nested-CLAUDE.md
   guard.
-- **Bounded**: a rule is truncated at 16k chars, one injection is capped at
-  48k, hostile/huge maps (>256 KiB, >512 entries, globs >256 chars) are
-  skipped with a warning, and at most 8 ancestor maps are consulted.
+- **Bounded**: a rule is truncated at 4k chars (the CLI warns above 2k), one
+  injection is capped at 24k, a scope is capped at 256 rules and a glob at 256
+  chars, and at most 8 scopes are consulted per tool call.
 - **No pathological matching**: globs are matched by a non-backtracking
   segment matcher, not a regex, so no glob can burn CPU or stall a tool call.
+  Frontmatter is parsed by one small parser with no comment syntax, anchors or
+  optional YAML dependency — there is no second parser to disagree with.
 - **Stays inside the scope**: `.claude/rules-by-path` must physically live
-  inside the project it claims to belong to, its `rules/` must be a real
-  directory inside it, rule files are opened without following symlinks and
-  must be regular files, and rule names must be plain, bounded `*.md` names. A
-  hostile map cannot point at a private key, `/etc`, `/proc/self/environ`, or
-  your global rules.
+  inside the project it claims to belong to, rule files are opened without
+  following symlinks and must be regular files, and rule names must be plain,
+  bounded `*.md` names. A hostile repository cannot reach a private key,
+  `/etc`, `/proc/self/environ`, or your global rules.
 - **Bounded trust**: the upward search stops at the repository root, and a map
   in a world-writable directory (a shared `/tmp`, say) is ignored — a
   directory you don't control cannot inject instructions into your session.
@@ -122,8 +146,9 @@ repo, so the whole team shares them.
   lock file, so a simultaneous first touch still injects a rule exactly once.
   The dedup key includes the rule's content, so editing a rule re-injects it
   in the same session.
-- **Never loses your rules**: the CLI refuses to rewrite a map it cannot fully
-  parse, and replaces it atomically.
+- **Never loses your rules**: each rule is an independent file, so no operation
+  rewrites a shared index; writes go through `mkstemp` + `os.replace`, so a
+  planted symlink cannot redirect one.
 - **Bash is out of scope by design**: `cat`/`sed` via Bash don't trigger
   injection — parsing paths out of arbitrary shell commands would be fragile
   and easy to spoof. The five file tools are the reliable signal.
@@ -180,16 +205,19 @@ Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directl
 
 ```bash
 # which rules cover this file? (uses the hook's own matching)
-"<plugin>/bin/rules-by-path" which --root <root> --path <file> --json
-# orphan entries, missing rule files, unsafe rules dir
+"<plugin>/bin/rules-by-path" which --root <root> --path <file>
+# rules that can never fire, empty rules, long rules, shared globs
 "<plugin>/bin/rules-by-path" validate --root <root>
 ```
 
 - **Rule not injecting?** Each rule version injects once per session. The
   state lives in `$CLAUDE_PLUGIN_DATA/state/` for a plugin install (falling
-  back to `~/.claude/cache/rules-by-path/`); delete
-  `<state-dir>/<session_id>.injected` to force re-injection. Check the rule is
-  inside the repository — the search stops at the repo root.
+  back to `~/.claude/cache/rules-by-path/`); delete `<state-dir>/<session_id>.json`
+  to force re-injection. Check the rule is inside the repository — the search
+  stops at the repo root — and that `validate` reports it.
+- **Upgrading from the `rules-map.yml` format?** Run
+  `"<plugin>/bin/rules-by-path" migrate --root <root>` (and `--global`). Until
+  you do, that scope injects nothing and the hook says so in context.
 - **Nothing happens at all?** Run `/rules-by-path:setup`, which smoke-tests the
   hook and reports whether Python was found.
 - **Hook errors** are printed to stderr (visible in verbose mode) and never

@@ -10,9 +10,18 @@ per issue those reviews found.
 
 ### What it does
 
-- **`PreToolUse` hook** — injects glob-matched markdown rules into context on
+- **One file per rule.** A rule is a markdown file in `.claude/rules-by-path/`
+  declaring its glob in frontmatter — no index file, so nothing can fall out of
+  sync and no operation rewrites shared state. A rule may declare several
+  globs, and several rules may share one glob.
+- **`PreToolUse` hook** — injects glob-matched rules into context on
   Read/Edit/Write/MultiEdit/NotebookEdit, once per rule version per session.
   Editing a rule re-injects it immediately.
+- **Reinforcement** — after the full injection, a rule is repeated as a
+  one-line reminder every N tool calls (default 25, `RULES_BY_PATH_REINFORCE_EVERY`
+  or per-rule `reinforce:`; `never` opts out). A rule injected hundreds of
+  thousands of tokens ago has faded, and a long-context session never compacts,
+  so it never gets the SessionStart reset either.
 - **`SessionStart` hook** (`compact|clear`) — resets the per-session dedup
   state, so rules survive compaction and `/clear`.
 - **Nested-CLAUDE.md guard** — writing a `CLAUDE.md` below the repository root
@@ -47,18 +56,20 @@ rule can only inject *its own text*:
   maps in world-writable directories (POSIX only), and is capped at 8 maps per
   tool call.
 - **No pathological input** — glob matching uses a non-backtracking segment
-  matcher rather than a regex, and parsed map values are never `repr`'d, so
-  neither a crafted glob nor a YAML alias bomb can stall a tool call.
+  matcher rather than a regex. Frontmatter has one small parser with no
+  comment syntax, no anchors and no optional YAML dependency, so there is no
+  second parser to disagree with it and no alias expansion to weaponise.
 - **Fair budget** — global rules are budgeted before project rules, so rules
   arriving with a cloned repo cannot crowd out your own guardrails.
 
 ### Reliability
 
-- The CLI refuses to rewrite a map it cannot fully parse, and replaces it
-  atomically — it will never silently discard your rules. Read-only commands
-  stay usable on a partly broken map.
+- Rules are independent files, so no command rewrites a shared index and a
+  broken rule never hides the others. Writes are atomic.
 - Globs containing `#`, quotes, backslashes or non-ASCII characters round-trip
-  intact, with or without PyYAML.
+  intact.
+- `validate` reports rules that can never fire, empty rules, long rules, globs
+  shared by several rules, and a total that exceeds one injection's budget.
 - Dedup state prefers `${CLAUDE_PLUGIN_DATA}`, falls back to `~/.claude/cache`
   and then a per-uid temp directory, and warns rather than silently
   re-injecting on every call.
@@ -66,8 +77,7 @@ rule can only inject *its own text*:
 
 ### Portability
 
-- Stdlib-only Python 3.8+; PyYAML optional, with a built-in parser for the map
-  format the CLI writes.
+- Standard library only, Python 3.8+. No YAML dependency at all.
 - `bin/` launchers resolve `python3`, `python` or the Windows `py` launcher, and
   work when installed via a symlink on `PATH`.
 - POSIX and Windows file locking. Tested on Linux and macOS; Windows support is

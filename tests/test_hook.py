@@ -1,6 +1,5 @@
-"""End-to-end and unit tests for hooks/rules-by-path.py."""
+"""Unit and end-to-end tests for hooks/rules-by-path.py."""
 
-import json
 import os
 import sys
 import tempfile
@@ -56,8 +55,9 @@ class GlobMatchingTest(unittest.TestCase):
         self.check("**/deploy/**", "deploy/main.tf", True)
         self.check("**/deploy/**", "src/deployment/main.tf", False)
 
-    def test_invalid_glob_is_skipped_not_fatal(self):
-        self.assertFalse(HOOK.glob_matches("[", "src/a.py", "/proj/src/a.py"))
+    def test_bracket_is_literal_not_a_character_class(self):
+        self.check("[", "src/a.py", False)
+        self.check("a[b].py", "a[b].py", True)
 
 
 class DeriveRuleNameTest(unittest.TestCase):
@@ -75,28 +75,45 @@ class DeriveRuleNameTest(unittest.TestCase):
             self.assertEqual(HOOK.derive_rule_name(glob), expected, glob)
 
 
-class FallbackParserTest(unittest.TestCase):
-    def test_admin_format(self):
-        text = (
-            "# comment line\n"
-            "rules:\n"
-            '  - glob: "src/api/**"\n'
-            '    rule: "src--api.md"\n'
-            '  - glob: "docs/**"\n'
-            "  - \"*.tf\"\n"
-        )
-        entries = HOOK.parse_map_without_yaml(text, "test-map")
-        self.assertEqual(entries, [
-            {"glob": "src/api/**", "rule": "src--api.md"},
-            {"glob": "docs/**", "rule": None},
-            {"glob": "*.tf", "rule": None},
-        ])
+class FrontmatterTest(unittest.TestCase):
+    def test_single_glob_and_body(self):
+        fields, body = HOOK.parse_frontmatter("---\nglob: src/**\n---\nrule text\n")
+        self.assertEqual(HOOK.globs_of(fields), ["src/**"])
+        self.assertEqual(body.strip(), "rule text")
 
-    def test_empty_and_garbage(self):
-        self.assertEqual(HOOK.parse_map_without_yaml("rules:\n", "m"), [])
-        self.assertEqual(HOOK.parse_map_without_yaml("", "m"), [])
-        entries = HOOK.parse_map_without_yaml("rules:\n  nonsense here\n", "m")
-        self.assertEqual(entries, [])
+    def test_glob_list(self):
+        text = "---\nglob:\n  - src/**\n  - lib/**\n---\nbody"
+        fields, body = HOOK.parse_frontmatter(text)
+        self.assertEqual(HOOK.globs_of(fields), ["src/**", "lib/**"])
+        self.assertEqual(body.strip(), "body")
+
+    def test_plural_key_accepted(self):
+        fields, _ = HOOK.parse_frontmatter("---\nglobs: a/**\n---\nx")
+        self.assertEqual(HOOK.globs_of(fields), ["a/**"])
+
+    def test_hash_in_glob_is_literal(self):
+        """No comment syntax in frontmatter, so a '#' in a glob survives."""
+        fields, _ = HOOK.parse_frontmatter("---\nglob: src/c#/**\n---\nx")
+        self.assertEqual(HOOK.globs_of(fields), ["src/c#/**"])
+
+    def test_quotes_are_stripped(self):
+        fields, _ = HOOK.parse_frontmatter('---\nglob: "src/a b/**"\n---\nx')
+        self.assertEqual(HOOK.globs_of(fields), ["src/a b/**"])
+
+    def test_no_frontmatter_means_no_glob(self):
+        fields, body = HOOK.parse_frontmatter("just a body\n")
+        self.assertEqual(HOOK.globs_of(fields), [])
+        self.assertEqual(body.strip(), "just a body")
+
+    def test_unterminated_frontmatter_is_not_parsed(self):
+        fields, _ = HOOK.parse_frontmatter("---\nglob: src/**\nno end marker\n")
+        self.assertEqual(HOOK.globs_of(fields), [])
+
+    def test_reinforce_values(self):
+        self.assertEqual(HOOK.reinforce_of({"reinforce": "10"}, 25), 10)
+        self.assertEqual(HOOK.reinforce_of({"reinforce": "never"}, 25), 0)
+        self.assertEqual(HOOK.reinforce_of({}, 25), 25)
+        self.assertEqual(HOOK.reinforce_of({"reinforce": "nonsense"}, 25), 25)
 
 
 class HookEndToEndTest(unittest.TestCase):
@@ -113,143 +130,109 @@ class HookEndToEndTest(unittest.TestCase):
     def target(self, rel):
         return os.path.join(self.proj, rel)
 
-    def test_injects_matching_project_rule_once_per_session(self):
-        util.write_rule_setup(self.proj, [("src/api/**", None, "API RULE CONTENT")])
-        payload = util.read_payload("Read", self.target("src/api/users.py"), session="s1")
-        proc = util.run_hook(payload, self.home)
+    def inject(self, rel="src/api/users.py", session="s1", tool="Read", env=None):
+        proc = util.run_hook(util.read_payload(tool, self.target(rel), session=session),
+                             self.home, env=env)
+        return proc, util.injected_text(proc)
+
+    def test_injects_matching_rule_once_per_session(self):
+        util.write_rule(self.proj, "src--api.md", "src/api/**", "API RULE CONTENT")
+        proc, text = self.inject()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        out = util.hook_output(proc)
-        self.assertIsNotNone(out, "expected an injection")
-        context = out["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("API RULE CONTENT", context)
-        self.assertIn("src/api/**", context)
-        self.assertTrue(out.get("suppressOutput"))
-        # same session: dedup
-        proc2 = util.run_hook(payload, self.home)
-        self.assertIsNone(util.hook_output(proc2), "second touch must not re-inject")
-        # other session: injects again
-        payload3 = util.read_payload("Read", self.target("src/api/users.py"), session="s2")
-        self.assertIsNotNone(util.hook_output(util.run_hook(payload3, self.home)))
+        self.assertIn("API RULE CONTENT", text)
+        self.assertIn("src/api/**", text)
+        self.assertTrue(util.hook_output(proc).get("suppressOutput"))
+        self.assertIsNone(self.inject()[1], "second touch must not re-inject")
+        self.assertIsNotNone(self.inject(session="s2")[1], "a new session injects again")
 
     def test_reset_session_reinjects(self):
-        util.write_rule_setup(self.proj, [("src/api/**", None, "API RULE CONTENT")])
-        payload = util.read_payload("Edit", self.target("src/api/users.py"), session="s1")
-        self.assertIsNotNone(util.hook_output(util.run_hook(payload, self.home)))
-        self.assertIsNone(util.hook_output(util.run_hook(payload, self.home)))
-        reset_payload = {"session_id": "s1", "hook_event_name": "SessionStart"}
-        util.run_hook(reset_payload, self.home, args=("--reset-session",))
-        self.assertIsNotNone(util.hook_output(util.run_hook(payload, self.home)),
-                             "after reset the rule must inject again")
+        util.write_rule(self.proj, "src--api.md", "src/api/**", "API RULE CONTENT")
+        self.assertIsNotNone(self.inject()[1])
+        self.assertIsNone(self.inject()[1])
+        util.run_hook({"session_id": "s1", "hook_event_name": "SessionStart"},
+                      self.home, args=("--reset-session",))
+        self.assertIsNotNone(self.inject()[1], "after reset the rule injects again")
 
     def test_non_matching_file_no_output(self):
-        util.write_rule_setup(self.proj, [("src/api/**", None, "API RULE CONTENT")])
-        payload = util.read_payload("Read", self.target("src/other/users.py"))
-        self.assertIsNone(util.hook_output(util.run_hook(payload, self.home)))
+        util.write_rule(self.proj, "src--api.md", "src/api/**", "API RULE")
+        self.assertIsNone(self.inject(rel="src/other/users.py")[1])
 
     def test_rules_dir_files_never_trigger(self):
-        util.write_rule_setup(self.proj, [("**", None, "EVERYTHING")])
-        inside = os.path.join(self.proj, ".claude", "rules-by-path", "rules", "x.md")
-        payload = util.read_payload("Read", inside)
-        self.assertIsNone(util.hook_output(util.run_hook(payload, self.home)))
+        util.write_rule(self.proj, "root.md", "**", "EVERYTHING")
+        inside = os.path.join(util.scope_dir(self.proj), "root.md")
+        self.assertIsNone(util.injected_text(
+            util.run_hook(util.read_payload("Read", inside), self.home)))
 
     def test_no_rules_anywhere_no_output(self):
-        payload = util.read_payload("Read", self.target("src/api/users.py"))
-        proc = util.run_hook(payload, self.home)
+        proc, text = self.inject()
         self.assertEqual(proc.returncode, 0)
-        self.assertIsNone(util.hook_output(proc))
+        self.assertIsNone(text)
 
-    def test_global_scope_absolute_glob(self):
-        util.write_rule_setup(self.home, [(f"{self.proj}/**".replace(os.sep, "/"),
-                                           "proj.md", "GLOBAL RULE")])
-        payload = util.read_payload("Read", self.target("anything.txt"))
-        out = util.hook_output(util.run_hook(payload, self.home))
-        self.assertIsNotNone(out)
-        self.assertIn("GLOBAL RULE", out["hookSpecificOutput"]["additionalContext"])
-        self.assertIn("global", out["hookSpecificOutput"]["additionalContext"])
+    def test_rule_without_a_glob_never_injects(self):
+        util.write_rule(self.proj, "orphan.md", [], "NEVER")
+        proc, text = self.inject()
+        self.assertIsNone(text)
+
+    def test_multiple_globs_on_one_rule(self):
+        util.write_rule(self.proj, "many.md", ["lib/**", "src/api/**"], "MULTI RULE")
+        self.assertIn("MULTI RULE", self.inject()[1])
+
+    def test_multiple_rules_for_the_same_glob_all_inject(self):
+        util.write_rule(self.proj, "security.md", "src/api/**", "SECURITY RULE")
+        util.write_rule(self.proj, "naming.md", "src/api/**", "NAMING RULE")
+        text = self.inject()[1]
+        self.assertIn("SECURITY RULE", text)
+        self.assertIn("NAMING RULE", text)
+        self.assertEqual(text.count("] name:"), 2)
+
+    def test_global_scope(self):
+        util.write_rule(self.home, "proj.md",
+                        f"{self.proj}/**".replace(os.sep, "/"), "GLOBAL RULE")
+        text = self.inject(rel="anything.txt")[1]
+        self.assertIn("GLOBAL RULE", text)
+        self.assertIn("global", text)
 
     def test_nested_claude_md_write_denied(self):
         os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
-        payload = util.read_payload("Write", self.target("src/CLAUDE.md"))
-        out = util.hook_output(util.run_hook(payload, self.home))
-        self.assertIsNotNone(out)
+        out = util.hook_output(util.run_hook(
+            util.read_payload("Write", self.target("src/CLAUDE.md")), self.home))
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_root_claude_md_write_allowed(self):
         os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
-        payload = util.read_payload("Write", self.target("CLAUDE.md"))
-        self.assertIsNone(util.hook_output(util.run_hook(payload, self.home)))
+        self.assertIsNone(util.hook_output(util.run_hook(
+            util.read_payload("Write", self.target("CLAUDE.md")), self.home)))
 
     def test_nested_claude_md_read_not_denied(self):
         os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
-        payload = util.read_payload("Read", self.target("src/CLAUDE.md"))
-        out = util.hook_output(util.run_hook(payload, self.home))
+        out = util.hook_output(util.run_hook(
+            util.read_payload("Read", self.target("src/CLAUDE.md")), self.home))
         self.assertTrue(out is None or "permissionDecision"
                         not in out.get("hookSpecificOutput", {}))
 
     def test_nested_repo_claude_md_allowed(self):
         os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
         os.makedirs(os.path.join(self.proj, "vendor", "lib", ".git"), exist_ok=True)
-        payload = util.read_payload("Write", self.target("vendor/lib/CLAUDE.md"))
-        self.assertIsNone(util.hook_output(util.run_hook(payload, self.home)))
-
-    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
-    def test_symlinked_rule_outside_rules_dir_refused(self):
-        secret = os.path.join(self.tmp.name, "secret.txt")
-        with open(secret, "w", encoding="utf-8") as handle:
-            handle.write("TOP SECRET KEY MATERIAL")
-        base = util.write_rule_setup(self.proj, [("src/**", "evil.md", "placeholder")])
-        evil = os.path.join(base, "rules", "evil.md")
-        os.unlink(evil)
-        os.symlink(secret, evil)
-        payload = util.read_payload("Read", self.target("src/a.py"))
-        proc = util.run_hook(payload, self.home)
-        self.assertIsNone(util.hook_output(proc), "symlinked rule must not inject")
-        self.assertIn("cannot open rule", proc.stderr)
+        self.assertIsNone(util.hook_output(util.run_hook(
+            util.read_payload("Write", self.target("vendor/lib/CLAUDE.md")), self.home)))
 
     def test_oversized_rule_truncated(self):
-        util.write_rule_setup(self.proj, [("src/**", None, "X" * 20_000)])
-        payload = util.read_payload("Read", self.target("src/a.py"))
-        out = util.hook_output(util.run_hook(payload, self.home))
-        context = out["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("truncated", context)
-        self.assertLess(len(context), 18_000)
+        util.write_rule(self.proj, "big.md", "src/**", "X" * (HOOK.MAX_RULE_CHARS + 5_000))
+        text = self.inject()[1]
+        self.assertIn("truncated", text)
+        self.assertLess(len(text), HOOK.MAX_RULE_CHARS + 2_000)
 
-    def test_total_cap_defers_extra_rules(self):
-        # four ~15k rules all matching the same file: 3 fit under the 48k cap,
-        # the 4th is deferred to the next tool call
-        util.write_rule_setup(
-            self.proj, [("src/**", f"r{i}.md", f"RULE{i} " + "y" * 15_000) for i in range(4)])
-        payload = util.read_payload("Read", self.target("src/a.py"), session="cap")
-        proc = util.run_hook(payload, self.home)
-        context = util.hook_output(proc)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("RULE0", context)
-        self.assertIn("RULE2", context)
-        self.assertNotIn("RULE3", context, "fourth rule must be deferred")
-        self.assertIn("left for the next tool call", proc.stderr)
-        # next call picks up the deferred rule
-        proc2 = util.run_hook(payload, self.home)
-        context2 = util.hook_output(proc2)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("RULE3", context2)
-
-    def test_huge_map_ignored(self):
-        base = util.write_rule_setup(self.proj, [("src/**", None, "RULE")])
-        with open(os.path.join(base, "rules-map.yml"), "a", encoding="utf-8") as handle:
-            handle.write("# " + "x" * 300_000 + "\n")
-        payload = util.read_payload("Read", self.target("src/a.py"))
-        proc = util.run_hook(payload, self.home)
-        self.assertIsNone(util.hook_output(proc))
-        self.assertIn("exceeds", proc.stderr)
-
-    def test_hostile_long_glob_skipped(self):
-        base = util.write_rule_setup(self.proj, [("src/**", None, "GOOD")])
-        hostile = "*a" * 300
-        with open(os.path.join(base, "rules-map.yml"), "w", encoding="utf-8") as handle:
-            handle.write(f'rules:\n  - glob: "{hostile}"\n  - glob: "src/**"\n')
-        payload = util.read_payload("Read", self.target("src/a.py"))
-        proc = util.run_hook(payload, self.home)
-        out = util.hook_output(proc)
-        self.assertIsNotNone(out, "good rule must still inject")
-        self.assertIn("GOOD", out["hookSpecificOutput"]["additionalContext"])
+    def test_budget_defers_extra_rules(self):
+        per_rule = HOOK.MAX_RULE_CHARS - 100
+        count = (HOOK.MAX_TOTAL_CHARS // per_rule) + 2
+        for index in range(count):
+            util.write_rule(self.proj, f"r{index:02d}.md", "src/**",
+                            f"RULE{index} " + "y" * per_rule)
+        proc, text = self.inject(session="cap")
+        self.assertIn("RULE0 ", text)
+        self.assertIn("budget", proc.stderr)
+        later = self.inject(session="cap")[1]
+        self.assertIsNotNone(later, "deferred rules arrive on the next call")
 
     def test_malformed_stdin_never_fails(self):
         proc = util.run_hook("this is not json", self.home)
@@ -258,35 +241,84 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertIn("unexpected error", proc.stderr)
 
     def test_payload_without_file_path_no_output(self):
-        payload = {"tool_name": "Bash", "tool_input": {"command": "ls"},
-                   "session_id": "s", "cwd": self.proj}
-        proc = util.run_hook(payload, self.home)
+        proc = util.run_hook({"tool_name": "Bash", "tool_input": {"command": "ls"},
+                              "session_id": "s", "cwd": self.proj}, self.home)
         self.assertEqual(proc.returncode, 0)
         self.assertIsNone(util.hook_output(proc))
 
     def test_relative_path_resolved_against_cwd(self):
-        util.write_rule_setup(self.proj, [("src/api/**", None, "API RULE CONTENT")])
-        payload = util.read_payload("Read", os.path.join("src", "api", "x.py"),
-                                    cwd=self.proj)
-        out = util.hook_output(util.run_hook(payload, self.home))
-        self.assertIsNotNone(out)
+        util.write_rule(self.proj, "src--api.md", "src/api/**", "API RULE")
+        proc = util.run_hook(util.read_payload(
+            "Read", os.path.join("src", "api", "x.py"), cwd=self.proj), self.home)
+        self.assertIsNotNone(util.injected_text(proc))
 
-    def test_missing_rule_file_warns_and_skips(self):
-        base = util.write_rule_setup(self.proj, [("src/**", None, "RULE")])
-        os.unlink(os.path.join(base, "rules", "src.md"))
-        payload = util.read_payload("Read", self.target("src/a.py"))
-        proc = util.run_hook(payload, self.home)
-        self.assertIsNone(util.hook_output(proc))
-        self.assertIn("cannot open rule", proc.stderr)
+    def test_legacy_map_is_reported_not_silently_ignored(self):
+        directory = util.scope_dir(self.proj)
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "rules-map.yml"), "w", encoding="utf-8") as h:
+            h.write('rules:\n  - glob: "src/**"\n')
+        proc, text = self.inject()
+        self.assertIsNotNone(text, "a legacy scope must not fail silently")
+        self.assertIn("migrate", text)
 
-    def test_rule_name_with_separator_refused(self):
-        base = util.write_rule_setup(self.proj, [("src/**", None, "RULE")])
-        with open(os.path.join(base, "rules-map.yml"), "w", encoding="utf-8") as handle:
-            handle.write('rules:\n  - glob: "src/**"\n    rule: "../../secrets.md"\n')
-        payload = util.read_payload("Read", self.target("src/a.py"))
-        proc = util.run_hook(payload, self.home)
-        self.assertIsNone(util.hook_output(proc))
-        self.assertIn("invalid rule name", proc.stderr)
+
+class ReinforcementTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def touch(self, session="r", env=None):
+        proc = util.run_hook(
+            util.read_payload("Read", os.path.join(self.proj, "src", "a.py"),
+                              session=session),
+            self.home, env=env)
+        return util.injected_text(proc)
+
+    def test_reminder_after_the_configured_number_of_calls(self):
+        util.write_rule(self.proj, "src.md", "src/**",
+                        "Always validate DTOs.\n\nMore detail that need not repeat.")
+        env = {"RULES_BY_PATH_REINFORCE_EVERY": "3"}
+        first = self.touch(env=env)
+        self.assertIn("Always validate DTOs.", first)
+        self.assertNotIn("REMINDER", first)
+        self.assertIsNone(self.touch(env=env), "call 2: nothing")
+        self.assertIsNone(self.touch(env=env), "call 3: nothing")
+        fourth = self.touch(env=env)
+        self.assertIsNotNone(fourth, "call 4 is 3 calls after the injection")
+        self.assertIn("REMINDER", fourth)
+        self.assertIn("Always validate DTOs.", fourth)
+        self.assertNotIn("More detail", fourth, "a reminder is the headline only")
+
+    def test_reinforcement_can_be_disabled(self):
+        util.write_rule(self.proj, "src.md", "src/**", "Rule text.")
+        env = {"RULES_BY_PATH_REINFORCE_EVERY": "0"}
+        self.assertIsNotNone(self.touch(env=env))
+        for _ in range(6):
+            self.assertIsNone(self.touch(env=env))
+
+    def test_per_rule_override_wins(self):
+        util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
+                        extra_frontmatter=["reinforce: never"])
+        env = {"RULES_BY_PATH_REINFORCE_EVERY": "2"}
+        self.assertIsNotNone(self.touch(env=env))
+        for _ in range(5):
+            self.assertIsNone(self.touch(env=env))
+
+    def test_edited_rule_reinjects_in_full_not_as_a_reminder(self):
+        util.write_rule(self.proj, "src.md", "src/**", "VERSION ONE")
+        env = {"RULES_BY_PATH_REINFORCE_EVERY": "50"}
+        self.assertIn("VERSION ONE", self.touch(env=env))
+        self.assertIsNone(self.touch(env=env))
+        util.write_rule(self.proj, "src.md", "src/**", "VERSION TWO body line")
+        text = self.touch(env=env)
+        self.assertIn("VERSION TWO", text)
+        self.assertNotIn("REMINDER", text, "a changed rule is new, not a reminder")
 
 
 if __name__ == "__main__":

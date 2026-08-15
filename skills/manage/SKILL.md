@@ -19,83 +19,98 @@ description: >
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" <subcommand> --root "<project-root>" [...]
 ```
 
-Use `--global` instead of `--root` for the machine-wide scope. Every write goes
-through this CLI — never edit `rules-map.yml` or the files under `rules/`
-directly, with a file tool or with `sed`. A partial edit leaves an orphan entry,
-and users who applied the recommended hardening have those paths deny-listed
-anyway. The CLI refuses to rewrite a map it cannot fully parse, so it will tell
-you rather than quietly drop entries.
+Use `--global` instead of `--root` for the machine-wide scope.
 
-## How the system works
+## What a rule is
 
-- `rules-map.yml` maps globs to markdown rule files in `rules/`.
-- The plugin's PreToolUse hook reads the maps on every
-  Read/Edit/Write/MultiEdit/NotebookEdit and injects matching rules into
-  context — at most once per rule *version* per session. Editing a rule makes
-  it inject again immediately.
-- File access through Bash (`cat`, `sed -i`, heredocs) does NOT trigger
-  injection — only the five file tools above do. This is deliberate: parsing
-  paths out of arbitrary shell commands would be fragile.
-- Two scopes:
-  - **Project**: `<project-root>/.claude/rules-by-path/` — globs are relative to
-    the project root. `<project-root>` is the repository root
-    (`git rev-parse --show-toplevel` from the target directory) unless the user
-    names a different root — never a subdirectory just because it is the cwd.
-  - **Global**: `~/.claude/rules-by-path/` — globs match the absolute path.
-- The hook stops looking upward at the repository root, so a map outside the
-  project never applies.
-- Changes take effect immediately. No restart needed.
+One markdown file that declares its own glob in frontmatter:
 
-## Registering a new rule
+```markdown
+---
+glob: src/api/**
+---
+Every endpoint validates its input and returns ProblemDetails on error.
+```
 
-1. **Determine the scope.** Default to project scope; use global only when the
-   user says the rule applies everywhere (or the target is outside any
-   project). If ambiguous, ask.
+That is the whole format. There is no index file, so nothing can fall out of
+sync. A rule may declare several globs, and several rules may share one glob —
+they all inject together.
 
-2. **Check whether a rule already covers the target.** `which` uses the hook's
-   own matching, so the answer is exact:
+Always write rules through the CLI rather than with a file tool: users who
+applied the recommended hardening have those paths deny-listed, and the CLI
+validates what it writes.
+
+## How injection works
+
+- The hook reads the rules on every Read/Edit/Write/MultiEdit/NotebookEdit and
+  injects the ones whose glob matches the touched file.
+- A rule is injected **in full once per session**, then **reinforced with a
+  one-line reminder** every N tool calls (default 25; `RULES_BY_PATH_REINFORCE_EVERY`
+  sets it globally, `reinforce:` in a rule's frontmatter overrides it per rule,
+  `never` disables it). Long-context sessions drift away from a rule injected
+  hundreds of thousands of tokens earlier.
+- Editing a rule re-injects it in full immediately — the dedup key includes the
+  content.
+- Bash access (`cat`, `sed -i`) does NOT trigger injection; only the five file
+  tools do.
+- Scopes: the project chain up to the repository root, plus `~/.claude/rules-by-path/`.
+  The global scope is budgeted first. `<project-root>` is the repository root
+  (`git rev-parse --show-toplevel`), not whatever directory happens to be the cwd.
+- Changes take effect immediately. No restart.
+
+## Adding a rule
+
+1. **Pick the scope.** Project by default; global only when the user says it
+   applies everywhere. If ambiguous, ask.
+
+2. **Check what already covers the target:**
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --root "<project-root>" \
-     --path <folder-or-file> --json
+   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --root "<root>" --path <folder-or-file>
    ```
 
-   It reports the rule *file name* for each match. If there is a match, update
-   that rule by name (step 4) — registering a similar-but-different glob would
-   create a duplicate entry.
+   It reports rule *file names*. An existing rule about the same concern should
+   be updated (step 4); a different concern is a new rule, even for the same glob.
 
-3. **Register a new rule** — content on stdin. The file name is derived from
-   the glob (leading/trailing `*`/`**` segments dropped, `/` → `--`, `.md`
-   appended: `src/api/**` → `src--api.md`). For globs like `*.cs` the derived
-   name would contain a metacharacter, so pass a clean `--rule csharp.md`:
+3. **Create it** — body on stdin, name derived from the glob (`src/api/**` →
+   `src--api.md`). For a glob like `*.cs` the derived name would contain a
+   metacharacter, so pass `--rule csharp.md`:
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" add --root "<project-root>" \
+   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" add --root "<root>" \
      --glob 'src/api/**' <<'EOF'
-   <markdown content of the rule, written by or with the user>
+   <the rule, written by or with the user>
    EOF
    ```
 
-   Keep rules short and directive (a rule is truncated at 16k chars and one
-   injection is capped at 48k).
+   Repeat `--glob` for several globs. `--reinforce never` for a rule that should
+   not be repeated.
 
-4. **Update an existing rule** — by file name, never by glob:
+4. **Update by name**, never by glob:
 
    ```bash
    "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" show   --root "<root>" --rule src--api.md
    "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" update --root "<root>" --rule src--api.md <<'EOF'
-   <new content>
+   <new body>
    EOF
    ```
 
-   `show` is the sanctioned way to read a rule — the hardening blocks `Read`
-   and `cat` on those paths. Read before you overwrite: `update` replaces the
-   whole file.
+   `show` is the sanctioned way to read a rule under the hardening. Read before
+   you overwrite: `update` replaces the whole body (it keeps the globs).
 
-   Never paste a glob you read out of a map back onto a command line — use the
-   rule file name instead (`update --rule`, `remove --rule`). Globs are repo
-   data; rule file names are validated, glob strings are not. A glob on the
-   command line should only ever be one the user just gave you.
+   Never paste a glob you read out of a rule back onto a command line — globs
+   are repository data. Rule file names are validated; glob strings are not.
+
+## Writing a good rule
+
+A rule states a **constraint that changes what you do**, not knowledge you
+could get by reading the code. "Endpoints here must return ProblemDetails" is a
+rule; a tour of how the module works is not.
+
+Keep it short: the CLI warns above 2,000 characters and the hook truncates at
+4,000. A long rule also makes reinforcement expensive, so it gets repeated less
+usefully. If a rule is growing, it usually wants to be split into two rules
+with narrower globs.
 
 ## Glob semantics
 
@@ -114,24 +129,26 @@ you rather than quietly drop entries.
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" list     --root "<root>"
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" validate --root "<root>"
-# remove by rule file name (safe: names are validated, globs are repo data)
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" remove   --root "<root>" --rule src--api.md
-# or by a glob the USER just named
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" remove   --root "<root>" --glob 'src/api/**'
 ```
 
-When the user asks "which rules exist?", check both scopes (project and
-`--global`). `validate` exits non-zero on orphan entries, missing rule files or
-an unsafe rules directory.
+`validate` reports rules that can never fire (no glob), empty rules, and notes
+long rules, shared globs and a total that exceeds one injection's budget. When
+the user asks "which rules exist?", check both scopes.
+
+## Migrating an old installation
+
+A scope still holding `rules-map.yml` injects nothing, and the hook says so in
+context. Convert it once:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" migrate --root "<root>"   # or --global
+```
 
 ## Reminders
 
-- Each rule version is injected once per session. After a compaction or
-  `/clear` a SessionStart hook resets that state automatically.
 - Files inside `.claude/rules-by-path/` never trigger injection themselves.
-- Creating/editing a nested CLAUDE.md (below a repo root) is denied by the hook
-  — that is intentional; only the project-root CLAUDE.md is a file.
-- The hook never blocks a tool call: on any internal failure it warns on
-  stderr and stays silent.
-- First rule in a fresh scope? `add` creates the skeleton implicitly; `init`
-  does it explicitly.
+- Creating a nested CLAUDE.md (below a repo root) is denied by the hook — that
+  is intentional; only the project-root CLAUDE.md is a file.
+- The hook never blocks a tool call: on any internal failure it warns on stderr
+  and stays silent.

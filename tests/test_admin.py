@@ -8,6 +8,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import util  # noqa: E402
 
+HOOK = util.load_hook_module()
+
 
 class AdminTest(unittest.TestCase):
     def setUp(self):
@@ -16,7 +18,7 @@ class AdminTest(unittest.TestCase):
         self.proj = os.path.join(self.tmp.name, "proj")
         os.makedirs(self.home)
         os.makedirs(self.proj)
-        self.base = os.path.join(self.proj, ".claude", "rules-by-path")
+        self.scope = util.scope_dir(self.proj)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -24,57 +26,93 @@ class AdminTest(unittest.TestCase):
     def admin(self, *args, stdin=""):
         return util.run_admin(list(args), self.home, stdin_text=stdin)
 
-    def read(self, *parts):
-        with open(os.path.join(self.base, *parts), encoding="utf-8") as handle:
+    def read(self, name):
+        with open(os.path.join(self.scope, name), encoding="utf-8") as handle:
             return handle.read()
 
-    def test_init_creates_skeleton(self):
+    def test_init_creates_the_scope(self):
         proc = self.admin("init", "--root", self.proj)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue(os.path.isfile(os.path.join(self.base, "rules-map.yml")))
-        self.assertTrue(os.path.isdir(os.path.join(self.base, "rules")))
-        self.assertIn("scope: project", self.read("rules-map.yml"))
+        self.assertTrue(os.path.isdir(self.scope))
 
     def test_init_global_uses_home(self):
         proc = self.admin("init", "--global")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        global_map = os.path.join(self.home, ".claude", "rules-by-path", "rules-map.yml")
-        self.assertTrue(os.path.isfile(global_map))
+        self.assertTrue(os.path.isdir(util.scope_dir(self.home)))
 
-    def test_add_creates_rule_and_entry(self):
+    def test_add_writes_frontmatter_and_body(self):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/api/**",
                           stdin="API RULE")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("src--api.md", proc.stdout)
-        self.assertIn("validation ok", proc.stdout)
-        self.assertEqual(self.read("rules", "src--api.md").strip(), "API RULE")
-        self.assertIn('- glob: "src/api/**"', self.read("rules-map.yml"))
+        content = self.read("src--api.md")
+        self.assertIn("glob: src/api/**", content)
+        self.assertIn("API RULE", content)
 
-    def test_add_duplicate_refused_force_overwrites(self):
+    def test_add_with_several_globs(self):
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
+                          "--glob", "lib/**", "--rule", "code.md", stdin="RULE")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        content = self.read("code.md")
+        self.assertIn("  - src/**", content)
+        self.assertIn("  - lib/**", content)
+
+    def test_add_refuses_to_clobber_without_force(self):
         self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="V1")
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="V2")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("--force", proc.stderr)
-        self.assertEqual(self.read("rules", "src.md").strip(), "V1")
-        proc = self.admin("add", "--root", self.proj, "--glob", "src/**", "--force",
-                          stdin="V2")
+        self.assertIn("already exists", proc.stderr)
+        self.assertIn("V1", self.read("src.md"))
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
+                          "--force", stdin="V2")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.read("rules", "src.md").strip(), "V2")
+        self.assertIn("V2", self.read("src.md"))
 
-    def test_derived_name_collision_refused(self):
-        self.admin("add", "--root", self.proj, "--glob", "src/api/**", stdin="A")
-        proc = self.admin("add", "--root", self.proj, "--glob", "src/api/*", stdin="B")
+    def test_two_rules_for_the_same_glob_are_allowed(self):
+        first = self.admin("add", "--root", self.proj, "--glob", "src/api/**",
+                           "--rule", "security.md", stdin="SECURITY")
+        second = self.admin("add", "--root", self.proj, "--glob", "src/api/**",
+                            "--rule", "naming.md", stdin="NAMING")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        listing = self.admin("list", "--root", self.proj).stdout
+        self.assertIn("security.md", listing)
+        self.assertIn("naming.md", listing)
+
+    def test_validate_notes_a_shared_glob(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--rule", "a.md", stdin="A")
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--rule", "b.md", stdin="B")
+        proc = self.admin("validate", "--root", self.proj)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("share the glob", proc.stdout)
+
+    def test_validate_notes_a_long_rule(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   stdin="L" * (HOOK.RULE_WARN_CHARS + 100))
+        proc = self.admin("validate", "--root", self.proj)
+        self.assertIn("constraints", proc.stdout)
+
+    def test_add_warns_about_a_long_rule(self):
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
+                          stdin="L" * (HOOK.RULE_WARN_CHARS + 100))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("soft limit", proc.stderr)
+
+    def test_validate_flags_a_rule_without_a_glob(self):
+        util.write_rule(self.proj, "orphan.md", [], "NO GLOB")
+        proc = self.admin("validate", "--root", self.proj)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("already belongs", proc.stderr)
+        self.assertIn("no glob", proc.stderr)
 
-    def test_metacharacter_name_needs_explicit_rule(self):
+    def test_derived_name_with_metacharacter_needs_explicit_rule(self):
         proc = self.admin("add", "--root", self.proj, "--glob", "*.cs", stdin="C#")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("--rule", proc.stderr)
         proc = self.admin("add", "--root", self.proj, "--glob", "*.cs",
                           "--rule", "csharp.md", stdin="C#")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.read("rules", "csharp.md").strip(), "C#")
 
     def test_unsafe_rule_name_refused(self):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
@@ -87,16 +125,15 @@ class AdminTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("empty rule content", proc.stderr)
 
-    def test_which_finds_matches_and_suggests(self):
+    def test_which_reports_matches_and_suggestions(self):
         self.admin("add", "--root", self.proj, "--glob", "src/api/**", stdin="A")
         proc = self.admin("which", "--root", self.proj, "--path", "src/api/users.py")
         self.assertIn("match: rule src--api.md", proc.stdout)
-        # folder query uses the synthetic-child probe
         os.makedirs(os.path.join(self.proj, "src", "api"), exist_ok=True)
         proc = self.admin("which", "--root", self.proj, "--path", "src/api")
         self.assertIn("match: rule src--api.md", proc.stdout)
         proc = self.admin("which", "--root", self.proj, "--path", "docs/guide.md")
-        self.assertIn("no entry covers", proc.stdout)
+        self.assertIn("no rule covers", proc.stdout)
         self.assertIn("docs/**", proc.stdout)
 
     def test_which_outside_root_fails(self):
@@ -104,51 +141,136 @@ class AdminTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("outside the root", proc.stderr)
 
-    def test_remove_deletes_entry_and_file(self):
-        self.admin("add", "--root", self.proj, "--glob", "src/api/**", stdin="A")
-        proc = self.admin("remove", "--root", self.proj, "--glob", "src/api/**")
+    def test_show_and_update_round_trip(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="ORIGINAL")
+        proc = self.admin("show", "--root", self.proj, "--rule", "src.md")
+        self.assertIn("ORIGINAL", proc.stdout)
+        self.assertIn("glob: src/**", proc.stdout)
+        proc = self.admin("update", "--root", self.proj, "--rule", "src.md",
+                          stdin="REPLACED")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertNotIn('\n  - glob: "src/api/**"', self.read("rules-map.yml"))
-        self.assertFalse(os.path.isfile(os.path.join(self.base, "rules", "src--api.md")))
+        content = self.read("src.md")
+        self.assertIn("REPLACED", content)
+        self.assertIn("glob: src/**", content, "update keeps the globs")
 
-    def test_remove_unknown_glob_fails(self):
-        self.admin("init", "--root", self.proj)
-        proc = self.admin("remove", "--root", self.proj, "--glob", "nope/**")
+    def test_update_unknown_rule_fails(self):
+        proc = self.admin("update", "--root", self.proj, "--rule", "ghost.md", stdin="X")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("not registered", proc.stderr)
+        self.assertIn("no such rule", proc.stderr)
 
-    def test_validate_detects_missing_rule_file(self):
+    def test_remove_by_name_and_by_glob(self):
         self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="A")
-        os.unlink(os.path.join(self.base, "rules", "src.md"))
-        proc = self.admin("validate", "--root", self.proj)
+        proc = self.admin("remove", "--root", self.proj, "--rule", "src.md")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.isfile(os.path.join(self.scope, "src.md")))
+        self.admin("add", "--root", self.proj, "--glob", "lib/**", stdin="B")
+        proc = self.admin("remove", "--root", self.proj, "--glob", "lib/**")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.isfile(os.path.join(self.scope, "lib.md")))
+
+    def test_remove_by_ambiguous_glob_asks_for_a_name(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--rule", "a.md", stdin="A")
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--rule", "b.md", stdin="B")
+        proc = self.admin("remove", "--root", self.proj, "--glob", "src/**")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("missing rule", proc.stderr)
+        self.assertIn("pick one with --rule", proc.stderr)
+
+    def test_remove_unknown_fails(self):
+        proc = self.admin("remove", "--root", self.proj, "--rule", "ghost.md")
+        self.assertNotEqual(proc.returncode, 0)
 
     def test_validate_empty_scope_ok(self):
         proc = self.admin("validate", "--root", self.proj)
         self.assertEqual(proc.returncode, 0)
-        self.assertIn("nothing to validate", proc.stdout)
-
-    def test_list_shows_map_and_files(self):
-        self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="A")
-        proc = self.admin("list", "--root", self.proj)
-        self.assertIn("src/**", proc.stdout)
-        self.assertIn("src.md", proc.stdout)
 
     def test_add_then_hook_injects(self):
-        """The admin-written map must be exactly what the hook consumes."""
+        """What the CLI writes must be exactly what the hook consumes."""
         self.admin("add", "--root", self.proj, "--glob", "src/api/**",
                    stdin="ROUNDTRIP RULE")
-        payload = util.read_payload(
-            "Read", os.path.join(self.proj, "src", "api", "x.py"))
-        out = util.hook_output(util.run_hook(payload, self.home))
-        self.assertIsNotNone(out)
-        self.assertIn("ROUNDTRIP RULE", out["hookSpecificOutput"]["additionalContext"])
+        proc = util.run_hook(util.read_payload(
+            "Read", os.path.join(self.proj, "src", "api", "x.py")), self.home)
+        self.assertIn("ROUNDTRIP RULE", util.injected_text(proc))
+
+    def test_reinforce_option_is_written_and_honoured(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--reinforce", "never", stdin="RULE")
+        self.assertIn("reinforce: never", self.read("src.md"))
 
     def test_nonexistent_root_fails(self):
         proc = self.admin("list", "--root", os.path.join(self.tmp.name, "missing"))
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("does not exist", proc.stderr)
+
+
+class MigrationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(self.proj)
+        self.scope = util.scope_dir(self.proj)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def admin(self, *args, stdin=""):
+        return util.run_admin(list(args), self.home, stdin_text=stdin)
+
+    def write_legacy(self, entries, bodies):
+        os.makedirs(os.path.join(self.scope, "rules"), exist_ok=True)
+        lines = ["rules:"]
+        for glob, name in entries:
+            lines.append(f'  - glob: "{glob}"')
+            if name:
+                lines.append(f'    rule: "{name}"')
+        with open(os.path.join(self.scope, "rules-map.yml"), "w", encoding="utf-8") as h:
+            h.write("\n".join(lines) + "\n")
+        for name, body in bodies.items():
+            with open(os.path.join(self.scope, "rules", name), "w", encoding="utf-8") as h:
+                h.write(body)
+
+    def test_migrate_converts_and_removes_the_legacy_files(self):
+        self.write_legacy([("src/api/**", "src--api.md"), ("docs/**", None)],
+                          {"src--api.md": "API RULE", "docs.md": "DOCS RULE"})
+        proc = self.admin("migrate", "--root", self.proj)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        with open(os.path.join(self.scope, "src--api.md"), encoding="utf-8") as h:
+            content = h.read()
+        self.assertIn("glob: src/api/**", content)
+        self.assertIn("API RULE", content)
+        self.assertFalse(os.path.isfile(os.path.join(self.scope, "rules-map.yml")))
+        self.assertFalse(os.path.isdir(os.path.join(self.scope, "rules")))
+
+    def test_migrated_rules_actually_inject(self):
+        self.write_legacy([("src/**", None)], {"src.md": "MIGRATED RULE"})
+        self.admin("migrate", "--root", self.proj)
+        proc = util.run_hook(util.read_payload(
+            "Read", os.path.join(self.proj, "src", "a.py")), self.home)
+        self.assertIn("MIGRATED RULE", util.injected_text(proc))
+
+    def test_migrate_merges_globs_that_shared_a_rule_file(self):
+        self.write_legacy([("src/**", "shared.md"), ("lib/**", "shared.md")],
+                          {"shared.md": "SHARED"})
+        self.admin("migrate", "--root", self.proj)
+        with open(os.path.join(self.scope, "shared.md"), encoding="utf-8") as h:
+            content = h.read()
+        self.assertIn("  - src/**", content)
+        self.assertIn("  - lib/**", content)
+
+    def test_migrate_keeps_legacy_files_when_something_is_skipped(self):
+        self.write_legacy([("src/**", None), ("gone/**", None)], {"src.md": "OK"})
+        proc = self.admin("migrate", "--root", self.proj)
+        self.assertIn("skipped", proc.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(self.scope, "rules-map.yml")),
+                        "nothing is deleted while an entry is unresolved")
+
+    def test_migrate_without_legacy_files_is_a_noop(self):
+        proc = self.admin("migrate", "--root", self.proj)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("nothing to migrate", proc.stdout)
 
 
 if __name__ == "__main__":
