@@ -1,0 +1,23 @@
+{
+  "name": "rules-by-path",
+  "displayName": "Rules by Path",
+  "version": "1.0.0",
+  "description": "Path-scoped rules for Claude Code: markdown rules auto-injected into context the moment Claude touches a file matching a glob. A scalable replacement for nested CLAUDE.md files — rules load only when relevant, once per session.",
+  "author": {
+    "name": "Pedro Martins",
+    "url": "https://github.com/pdmartins"
+  },
+  "license": "MIT",
+  "keywords": [
+    "rules",
+    "context",
+    "hooks",
+    "claude-md",
+    "path-scoped",
+    "context-engineering"
+  ],
+  "homepage": "https://github.com/pdmartins/rules-by-path",
+  "repository": "https://github.com/pdmartins/rules-by-path",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}
