@@ -1,0 +1,11 @@
+#!/bin/sh
+# rules-by-path admin CLI launcher. Resolves whichever Python is available so
+# the plugin does not depend on a `python3` name that many installs lack.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+for PY in python3 python; do
+    if command -v "$PY" >/dev/null 2>&1; then
+        exec "$PY" "$DIR/scripts/rules-by-path-admin.py" "$@"
+    fi
+done
+echo "rules-by-path: no python3/python found on PATH; install Python 3.8+" >&2
+exit 1

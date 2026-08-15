@@ -20,7 +20,7 @@ def load_hook_module():
     return module
 
 
-def isolated_env(fake_home):
+def isolated_env(fake_home, extra=None):
     """Environment for subprocesses with HOME redirected, so tests never touch
     the real ~/.claude (state, global rules)."""
     env = dict(os.environ)
@@ -28,15 +28,19 @@ def isolated_env(fake_home):
     env["USERPROFILE"] = fake_home  # Windows expanduser
     env.pop("HOMEPATH", None)
     env.pop("HOMEDRIVE", None)
+    env.pop("CLAUDE_PLUGIN_DATA", None)
+    if extra:
+        env.update(extra)
     return env
 
 
-def run_hook(payload, fake_home, args=()):
+def run_hook(payload, fake_home, args=(), env=None, timeout=30):
     """Run the hook as Claude Code would: JSON payload on stdin."""
     proc = subprocess.run(
         [sys.executable, HOOK_PATH, *args],
         input=json.dumps(payload) if isinstance(payload, dict) else payload,
-        capture_output=True, text=True, env=isolated_env(fake_home), timeout=30,
+        capture_output=True, text=True, env=isolated_env(fake_home, env),
+        timeout=timeout,
     )
     return proc
 
@@ -47,11 +51,11 @@ def hook_output(proc):
     return json.loads(out) if out else None
 
 
-def run_admin(args, fake_home, stdin_text=""):
+def run_admin(args, fake_home, stdin_text="", env=None):
     return subprocess.run(
         [sys.executable, ADMIN_PATH, *args],
         input=stdin_text, capture_output=True, text=True,
-        env=isolated_env(fake_home), timeout=30,
+        env=isolated_env(fake_home, env), timeout=30,
     )
 
 

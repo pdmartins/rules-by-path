@@ -80,7 +80,7 @@ class AdminTest(unittest.TestCase):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
                           "--rule", "../evil.md", stdin="X")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("flat names only", proc.stderr)
+        self.assertIn("invalid rule name", proc.stderr)
 
     def test_empty_content_refused(self):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="  \n ")
@@ -90,11 +90,11 @@ class AdminTest(unittest.TestCase):
     def test_which_finds_matches_and_suggests(self):
         self.admin("add", "--root", self.proj, "--glob", "src/api/**", stdin="A")
         proc = self.admin("which", "--root", self.proj, "--path", "src/api/users.py")
-        self.assertIn("match: 'src/api/**'", proc.stdout)
+        self.assertIn("match: rule src--api.md", proc.stdout)
         # folder query uses the synthetic-child probe
         os.makedirs(os.path.join(self.proj, "src", "api"), exist_ok=True)
         proc = self.admin("which", "--root", self.proj, "--path", "src/api")
-        self.assertIn("match: 'src/api/**'", proc.stdout)
+        self.assertIn("match: rule src--api.md", proc.stdout)
         proc = self.admin("which", "--root", self.proj, "--path", "docs/guide.md")
         self.assertIn("no entry covers", proc.stdout)
         self.assertIn("docs/**", proc.stdout)
@@ -132,7 +132,7 @@ class AdminTest(unittest.TestCase):
     def test_list_shows_map_and_files(self):
         self.admin("add", "--root", self.proj, "--glob", "src/**", stdin="A")
         proc = self.admin("list", "--root", self.proj)
-        self.assertIn('- glob: "src/**"', proc.stdout)
+        self.assertIn("src/**", proc.stdout)
         self.assertIn("src.md", proc.stdout)
 
     def test_add_then_hook_injects(self):

@@ -41,9 +41,11 @@ In Claude Code:
 Then run `/rules-by-path:setup` once — it checks prerequisites, smoke-tests
 the hook, and offers the recommended permission hardening.
 
-**Requirements:** `python3` on `PATH` (any 3.8+; stdlib only). PyYAML is
-optional — without it a built-in parser handles the map format the plugin
-itself writes.
+**Requirements:** Python 3.8+ on `PATH` as `python3`, `python` or (Windows)
+the `py` launcher — stdlib only, no packages to install. PyYAML is optional:
+without it a built-in parser handles the map format the plugin itself writes.
+Tested on Linux and macOS; Windows support is implemented but not yet verified
+by the author.
 
 ## Quick start
 
@@ -98,23 +100,43 @@ the whole team shares them.
   guard.
 - **Bounded**: a rule is truncated at 16k chars, one injection is capped at
   48k, hostile/huge maps (>256 KiB, >512 entries, globs >256 chars) are
-  skipped with a warning.
-- **Symlink-safe**: a rule file that resolves outside its `rules/` directory
-  is refused, so a hostile map cannot pull arbitrary readable files (keys,
-  tokens) into context.
+  skipped with a warning, and at most 8 ancestor maps are consulted.
+- **No pathological matching**: globs are matched by a non-backtracking
+  segment matcher, not a regex, so no glob can burn CPU or stall a tool call.
+- **Stays inside the scope**: the `rules/` directory must be a real directory
+  inside the map's own folder, rule files are opened without following
+  symlinks and must be regular files, and rule names must be plain `*.md`
+  names. A hostile map cannot point at a private key, `/etc`, or
+  `/proc/self/environ`.
+- **Bounded trust**: the upward search stops at the repository root, and a map
+  in a world-writable directory (a shared `/tmp`, say) is ignored — a
+  directory you don't control cannot inject instructions into your session.
+- **Unforgeable provenance**: each injection carries a random per-call marker,
+  and the header states how many blocks legitimately carry it. Rule content
+  cannot forge a block claiming to come from a more trusted scope.
 - **Concurrency-safe dedup**: parallel tool calls serialize on a per-session
   lock file, so a simultaneous first touch still injects a rule exactly once.
+  The dedup key includes the rule's content, so editing a rule re-injects it
+  in the same session.
+- **Never loses your rules**: the CLI refuses to rewrite a map it cannot fully
+  parse, and replaces it atomically.
 - **Bash is out of scope by design**: `cat`/`sed` via Bash don't trigger
   injection — parsing paths out of arbitrary shell commands would be fragile
   and easy to spoof. The five file tools are the reliable signal.
 
 ## Security model
 
-Project rules ride with the repo — they have exactly the same trust level as
-a repo's `CLAUDE.md`: cloning a repository means trusting its rule content.
-Review `.claude/rules-by-path/` in code review like any other instruction
-file. Injected blocks are always labeled with their source scope and glob, so
-provenance is visible in context.
+**Rule content is trusted input, at the same level as a repository's
+`CLAUDE.md`.** Project rules ride with the repo, so cloning a repository means
+trusting whatever instructions its rules contain, and you should review
+`.claude/rules-by-path/` in code review like any other instruction file. What
+the plugin guarantees is narrower and mechanical: a rule can only ever inject
+*its own text*, it cannot read other files, impersonate a more trusted scope,
+or hang your session.
+
+That boundary is enforced by the containment, provenance and matching
+guarantees listed above, each covered by a regression test in
+`tests/test_security.py`.
 
 ### Recommended hardening
 
@@ -126,28 +148,44 @@ provenance is visible in context.
   "deny": [
     "Read(**/.claude/rules-by-path/**)",
     "Edit(**/.claude/rules-by-path/**)",
-    "Grep(**/.claude/rules-by-path/**)",
-    "Read(~/.claude/rules-by-path/**)",
-    "Edit(~/.claude/rules-by-path/**)",
-    "Grep(~/.claude/rules-by-path/**)"
+    "Grep(**/.claude/rules-by-path/**)"
   ]
 }
 ```
 
-With this, rule files reach context **only** through the hook, and the agent
-cannot quietly rewrite its own rules — every change goes through the bundled
-admin CLI (`scripts/rules-by-path-admin.py`), which validates the map on
-every write. Optional, but it is how the system is meant to run.
+With this, the *file tools* can no longer read or rewrite rule files, so rules
+reach context through the hook and changes go through the bundled CLI, which
+validates the map on every write. Reading and updating a rule stay available
+through `rules-by-path show` and `rules-by-path update`.
+
+It raises the bar; it is not a sandbox — it constrains Claude's file tools,
+not arbitrary subprocesses. Optional, but it is how the system is meant to run.
+
+## Uninstalling
+
+`/plugin uninstall rules-by-path@rules-by-path` removes the hook and the
+skills. Three things outlive it, and `/rules-by-path:setup` walks you through
+them: the deny-list entries above (remove them, or those paths stay
+unreadable), the cache at `~/.claude/cache/rules-by-path`, and your authored
+rules in `~/.claude/rules-by-path/` and each project's
+`.claude/rules-by-path/`.
 
 ## Troubleshooting
 
-- **Rule not injecting?** `python3 "<plugin>/scripts/rules-by-path-admin.py"
-  which --root <root> --path <file>` shows exactly which entries match — it
-  uses the hook's own matching code. Remember each rule injects only once per
-  session; delete `~/.claude/cache/rules-by-path/<session_id>.injected` to
-  force re-injection.
-- **Map looks broken?** `... validate --root <root>` (or `--global`) reports
-  orphan entries and missing rule files.
+Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directly:
+
+```bash
+# which rules cover this file? (uses the hook's own matching)
+"<plugin>/bin/rules-by-path" which --root <root> --path <file> --json
+# orphan entries, missing rule files, unsafe rules dir
+"<plugin>/bin/rules-by-path" validate --root <root>
+```
+
+- **Rule not injecting?** Each rule version injects once per session; delete
+  `~/.claude/cache/rules-by-path/<session_id>.injected` to force it. Check the
+  rule is inside the repository — the search stops at the repo root.
+- **Nothing happens at all?** Run `/rules-by-path:setup`, which smoke-tests the
+  hook and reports whether Python was found.
 - **Hook errors** are printed to stderr (visible in verbose mode) and never
   block the tool call.
 

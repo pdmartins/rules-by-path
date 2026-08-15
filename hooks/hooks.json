@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/rules-by-path.py\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-hook\"",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/rules-by-path.py\" --reset-session",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-hook\" --reset-session",
             "timeout": 10,
             "async": true
           }

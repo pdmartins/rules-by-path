@@ -204,7 +204,7 @@ class HookEndToEndTest(unittest.TestCase):
         payload = util.read_payload("Read", self.target("src/a.py"))
         proc = util.run_hook(payload, self.home)
         self.assertIsNone(util.hook_output(proc), "symlinked rule must not inject")
-        self.assertIn("resolves outside", proc.stderr)
+        self.assertIn("cannot open rule", proc.stderr)
 
     def test_oversized_rule_truncated(self):
         util.write_rule_setup(self.proj, [("src/**", None, "X" * 20_000)])
@@ -277,7 +277,7 @@ class HookEndToEndTest(unittest.TestCase):
         payload = util.read_payload("Read", self.target("src/a.py"))
         proc = util.run_hook(payload, self.home)
         self.assertIsNone(util.hook_output(proc))
-        self.assertIn("not found", proc.stderr)
+        self.assertIn("cannot open rule", proc.stderr)
 
     def test_rule_name_with_separator_refused(self):
         base = util.write_rule_setup(self.proj, [("src/**", None, "RULE")])
@@ -286,7 +286,7 @@ class HookEndToEndTest(unittest.TestCase):
         payload = util.read_payload("Read", self.target("src/a.py"))
         proc = util.run_hook(payload, self.home)
         self.assertIsNone(util.hook_output(proc))
-        self.assertIn("flat names only", proc.stderr)
+        self.assertIn("invalid rule name", proc.stderr)
 
 
 if __name__ == "__main__":
