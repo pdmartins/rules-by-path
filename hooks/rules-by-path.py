@@ -407,15 +407,23 @@ def scope_is_contained(base_dir, scope_dir):
     return os.path.realpath(scope_dir) == expected
 
 
-def usable_scope(base_dir):
-    """The scope directory for `base_dir`, or None when it is absent or unsafe."""
+def usable_scope(base_dir, is_global=False):
+    """The scope directory for `base_dir`, or None when it is absent or unsafe.
+
+    Physical containment is required for a PROJECT scope, where a symlinked
+    `.claude` can arrive inside a cloned repository and redirect everything to
+    the attacker's target. It is NOT required for the global scope: `~/.claude`
+    is the user's own configuration, symlinking it elsewhere (shared config,
+    dotfiles in a repo) is a normal and deliberate choice, and nobody can plant
+    that link without already owning the home directory. Ownership of the real
+    target is still checked in both cases."""
     scope_dir = os.path.join(base_dir, RULES_DIR_RELPATH)
     if not os.path.isdir(scope_dir):
         return None
-    if not scope_is_contained(base_dir, scope_dir):
+    if not is_global and not scope_is_contained(base_dir, scope_dir):
         warn(f"ignoring {scope_dir}: it does not physically live inside {base_dir}")
         return None
-    if not is_safely_owned(scope_dir):
+    if not is_safely_owned(os.path.realpath(scope_dir)):
         warn(f"ignoring {scope_dir}: not safely owned (world-writable or another user's)")
         return None
     return scope_dir
@@ -434,7 +442,7 @@ def find_scopes(start_dir):
     seen = set()
     home = os.path.realpath(os.path.expanduser("~"))
 
-    global_scope = usable_scope(home)
+    global_scope = usable_scope(home, is_global=True)
     if global_scope:
         seen.add(os.path.realpath(global_scope))
         scopes.append((None, global_scope, "global"))
@@ -522,7 +530,10 @@ def scope_index(scope_dir):
     entries = []
     for name in names:
         result = read_rule_file(scope_dir, name, body_limit=0)
-        if result is not None:
+        # Frontmatter is what makes a file a rule. A plain markdown file that
+        # happens to sit in the directory (a README, notes) is not a broken
+        # rule — it is simply not a rule, and must not be reported as one.
+        if result is not None and result[0]:
             entries.append((name, result[0]))
     return entries
 

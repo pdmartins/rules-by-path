@@ -76,8 +76,15 @@ def scope_for(args):
         if not os.path.isdir(anchor):
             fail(f"project root does not exist: {anchor}")
     scope_dir = os.path.join(anchor, RULES_DIR_RELPATH)
-    if not HOOK.scope_is_contained(anchor, scope_dir):
+    # Physical containment is required for a project scope, where a symlinked
+    # `.claude` can arrive in a cloned repo. The global scope is the user's own
+    # configuration — symlinking `~/.claude` to shared or versioned config is a
+    # normal choice, and nobody can plant that link without owning the home dir.
+    if not args.use_global and not HOOK.scope_is_contained(anchor, scope_dir):
         fail(f"{scope_dir} does not physically live inside {anchor} (symlink?); "
+             f"refusing to touch it")
+    if os.path.isdir(scope_dir) and not HOOK.is_safely_owned(os.path.realpath(scope_dir)):
+        fail(f"{scope_dir} is not safely owned (world-writable or another user's); "
              f"refusing to touch it")
     return scope_dir, anchor
 
@@ -106,6 +113,18 @@ def atomic_write(path, text):
         except OSError:
             pass
         raise
+
+
+def other_markdown_in(scope_dir):
+    """Markdown files in the scope that are not rules (no frontmatter)."""
+    rule_names = {name for name, _ in HOOK.scope_index(scope_dir)}
+    try:
+        with os.scandir(scope_dir) as it:
+            return sorted(e.name for e in it
+                          if e.name.endswith(".md") and e.name not in rule_names
+                          and e.is_file(follow_symlinks=False))
+    except OSError:
+        return []
 
 
 def rules_in(scope_dir):
@@ -156,6 +175,9 @@ def cmd_list(args):
         globs = HOOK.globs_of(fields)
         shown = ", ".join(globs) if globs else "(NO GLOB — never injected)"
         print(f"{name}  <-  {shown}")
+    others = other_markdown_in(scope_dir)
+    if others:
+        print(f"\n(not rules, no frontmatter: {', '.join(others)})")
     if HOOK.has_legacy_map(scope_dir):
         print("\nWARNING: a legacy rules-map.yml is present and is NOT being used. "
               "Run `migrate` to convert it.")
@@ -332,6 +354,9 @@ def validate_scope(scope_dir, quiet=False):
         if unknown:
             notes.append(f"{name}: unknown frontmatter key(s): "
                          f"{', '.join(sorted(unknown))}")
+    others = other_markdown_in(scope_dir)
+    if others:
+        notes.append(f"ignored (no frontmatter, so not rules): {', '.join(others)}")
     for glob, names in sorted(by_glob.items()):
         if len(names) > 1:
             notes.append(f"{len(names)} rules share the glob {glob!r} "

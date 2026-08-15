@@ -394,3 +394,60 @@ class NestedClaudeMdTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealWorldLayoutTest(unittest.TestCase):
+    """Cases found against a real installation, not synthesised."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.real_home = os.path.join(self.tmp.name, "real")
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(os.path.join(self.real_home, ".claude"))
+        os.symlink(os.path.join(self.real_home, ".claude"),
+                   os.path.join(self.tmp.name, "home_claude"))
+        os.makedirs(self.home)
+        os.symlink(os.path.join(self.real_home, ".claude"),
+                   os.path.join(self.home, ".claude"))
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_symlinked_home_claude_still_serves_global_rules(self):
+        """`~/.claude -> /opt/shared/.claude` is a normal dotfiles setup; the
+        containment fix must not make the plugin silently inert for it."""
+        scope = os.path.join(self.real_home, ".claude", "rules-by-path")
+        os.makedirs(scope, exist_ok=True)
+        with open(os.path.join(scope, "everything.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nglob: '**'\n---\nGLOBAL RULE FROM SHARED CONFIG")
+        proc = util.run_hook(util.read_payload(
+            "Read", os.path.join(self.proj, "src", "a.py")), self.home)
+        self.assertIn("GLOBAL RULE FROM SHARED CONFIG", util.injected_text(proc) or "")
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_symlinked_project_scope_is_still_refused(self):
+        """The same shape inside a project is the attack, and stays refused."""
+        elsewhere = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(elsewhere)
+        with open(os.path.join(elsewhere, "evil.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nglob: '**'\n---\nATTACKER RULE")
+        os.makedirs(os.path.join(self.proj, ".claude"), exist_ok=True)
+        os.symlink(elsewhere, util.scope_dir(self.proj))
+        proc = util.run_hook(util.read_payload(
+            "Read", os.path.join(self.proj, "src", "a.py")), self.home)
+        self.assertNotIn("ATTACKER RULE", proc.stdout)
+
+    def test_a_markdown_file_without_frontmatter_is_not_a_rule(self):
+        """A README living beside the rules must not be reported as a broken
+        rule, and must never be injected."""
+        scope = os.path.join(self.real_home, ".claude", "rules-by-path")
+        os.makedirs(scope, exist_ok=True)
+        with open(os.path.join(scope, "README.md"), "w", encoding="utf-8") as handle:
+            handle.write("# Notes about my rules\n\nNot a rule.\n")
+        self.assertEqual(HOOK.scope_index(scope), [])
+        proc = util.run_hook(util.read_payload(
+            "Read", os.path.join(self.proj, "src", "a.py")), self.home)
+        self.assertIsNone(util.injected_text(proc))
