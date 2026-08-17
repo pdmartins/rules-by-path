@@ -222,6 +222,13 @@ reach context through the hook and changes go through the bundled CLI, which
 validates what it writes. Reading and updating a rule stay available through
 `rules-by-path show` and `rules-by-path update`.
 
+So that the deny-list is not something Claude discovers the hard way, a
+`SessionStart` hook says it once, up front: the rules directory is managed by
+the plugin, its contents arrive automatically, and the CLI is the way in.
+Without that, the agent meets the directory by listing or reading it and
+collects a permission denial — which explains nothing, so the attempt repeats
+next session. The notice is emitted only when a scope actually exists.
+
 It raises the bar; it is not a sandbox — it constrains Claude's file tools,
 not arbitrary subprocesses. Optional, but it is how the system is meant to run.
 

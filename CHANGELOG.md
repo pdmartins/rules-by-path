@@ -22,8 +22,11 @@ per issue those reviews found.
   or per-rule `reinforce:`; `never` opts out). A rule injected hundreds of
   thousands of tokens ago has faded, and a long-context session never compacts,
   so it never gets the SessionStart reset either.
-- **`SessionStart` hook** (`compact|clear`) — resets the per-session dedup
-  state, so rules survive compaction and `/clear`.
+- **`SessionStart` hooks** — on `compact|clear`, resets the per-session dedup
+  state so rules survive compaction and `/clear`. On any session start, states
+  once that the rules directory is managed by the plugin and names the CLI, so
+  the agent does not learn that from a permission denial in every session. Both
+  are silent when no scope exists.
 - **Nested-CLAUDE.md guard** — *creating* a `CLAUDE.md` below the repository
   root is denied, with guidance to register a path rule instead. One that
   already exists stays editable, and the guard never applies above your home

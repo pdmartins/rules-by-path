@@ -46,6 +46,16 @@ rm -f ~/.claude/cache/rules-by-path/rbp-setup-probe.json
 [ -n "$CLAUDE_PLUGIN_DATA" ] && rm -f "$CLAUDE_PLUGIN_DATA/state/rbp-setup-probe.json"
 ```
 
+The session notice is a separate entry point; check it too:
+
+```bash
+printf '{"hook_event_name":"SessionStart","source":"startup","cwd":"%s"}' "$PWD" \
+  | "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-hook" --session-notice; echo "exit=$?"
+```
+
+Expected: JSON with `additionalContext` when any scope exists, and nothing at
+all when none does. It writes no state, so there is nothing to clean up.
+
 ## 3. Initialize the global scope (optional)
 
 Only if the user wants machine-wide rules:
@@ -101,6 +111,12 @@ obvious alternatives wrong, both verified against 2.1.233:
 If the user agrees: read `~/.claude/settings.json`, MERGE these entries into the
 existing `permissions.deny` array (create it if absent, keep everything else
 untouched, no duplicates), and write it back. Show the user the diff.
+
+Claude is told about the deny-list at every session start (a `SessionStart`
+hook states that the directory is managed by the plugin and names the CLI), so
+the hardening should not produce a stream of refused reads. If the user reports
+denials anyway, check that hook is firing before assuming the deny-list is at
+fault — and remember an already-open session keeps the hooks it started with.
 
 Be explicit about the trade-off so it is an informed choice:
 

@@ -323,3 +323,42 @@ class ReinforcementTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionNoticeTest(unittest.TestCase):
+    """SessionStart tells the agent, once, that the rules directory is managed
+    by the plugin — so it never learns the same thing from a permission denial."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def notice(self):
+        payload = {"hook_event_name": "SessionStart", "source": "startup",
+                   "cwd": self.proj, "session_id": "notice"}
+        proc = util.run_hook(payload, self.home, args=("--session-notice",))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = util.hook_output(proc)
+        if out is None:
+            return None
+        return out["hookSpecificOutput"]["additionalContext"]
+
+    def test_silent_when_no_scope_exists_anywhere(self):
+        self.assertIsNone(self.notice(), "a session with no rules must cost nothing")
+
+    def test_announced_when_a_global_scope_exists(self):
+        util.write_rule(self.home, "g.md", "**", "Global rule.")
+        text = self.notice()
+        self.assertIsNotNone(text)
+        self.assertIn("rules-by-path", text)
+        self.assertIn("list", text, "the notice must name the way in")
+
+    def test_announced_when_only_a_project_scope_exists(self):
+        util.write_rule(self.proj, "src.md", "src/**", "Project rule.")
+        self.assertIsNotNone(self.notice())

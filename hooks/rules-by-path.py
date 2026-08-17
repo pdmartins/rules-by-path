@@ -113,6 +113,18 @@ LEGACY_NOTICE = (
     "Tell the user this happened."
 )
 
+SESSION_NOTICE = (
+    "[rules-by-path] This session has path-scoped rules available. They are "
+    "markdown files under `.claude/rules-by-path/` (project) and "
+    "`~/.claude/rules-by-path/` (global), and they reach you AUTOMATICALLY: the "
+    "moment you touch a file whose glob matches, the rule is injected into your "
+    "context. So there is never a reason to open, list, grep or edit those files "
+    "yourself — and the recommended setup deny-lists them, so an attempt is "
+    "refused rather than answered. To read or change a rule, use the CLI: "
+    f"\"{ADMIN_COMMAND}\" list|show|which|add|update, with --root '<repo-root>' "
+    "or --global — or the rules-by-path:manage skill, which drives it for you."
+)
+
 TRUNCATION_NOTICE = "\n[...rule truncated by the rules-by-path size limit...]"
 
 # Framing that carries authority in this context, and which rule content
@@ -1127,6 +1139,32 @@ def main():
     cleanup_stale_state()
 
 
+def session_notice():
+    """SessionStart: say up front that the rules directory is the plugin's
+    business, not the agent's.
+
+    Without this the agent meets the directory the only way it can — by listing,
+    reading or grepping it — and collects a permission denial for every attempt,
+    in every session, because the recommended hardening deny-lists exactly those
+    paths. A denial explains nothing, so the attempt repeats in the next session.
+    Saying it once, before anything is tried, costs about eighty tokens and only
+    in sessions that actually have a scope; the denials cost more than that and
+    teach nothing."""
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+    cwd = payload.get("cwd") or os.getcwd()
+    if not find_scopes(os.path.abspath(cwd)):
+        return  # no rules anywhere near this session: say nothing at all
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": SESSION_NOTICE,
+        },
+    }))
+
+
 def reset_session():
     """SessionStart (source compact|clear) mode: drop the session's state so
     rules are re-injected on the next touch — compaction may have summarized
@@ -1145,6 +1183,8 @@ if __name__ == "__main__":
     try:
         if "--reset-session" in sys.argv[1:]:
             reset_session()
+        elif "--session-notice" in sys.argv[1:]:
+            session_notice()
         else:
             main()
     except Exception as exc:  # never break the tool call because of this hook

@@ -23,6 +23,16 @@
             "async": true
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|compact|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path-hook\" --session-notice",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
