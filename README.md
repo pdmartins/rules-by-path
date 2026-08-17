@@ -39,7 +39,7 @@ In Claude Code:
 
 ```
 /plugin marketplace add pdmartins/rules-by-path
-/plugin install rules-by-path@rules-by-path
+/plugin install rules-by-path@pdmartins
 ```
 
 Then run `/rules-by-path:setup` once — it checks prerequisites, smoke-tests
@@ -234,7 +234,7 @@ not arbitrary subprocesses. Optional, but it is how the system is meant to run.
 
 ## Uninstalling
 
-`/plugin uninstall rules-by-path@rules-by-path` removes the hook and the
+`/plugin uninstall rules-by-path@pdmartins` removes the hook and the
 skills. Three things outlive it, and `/rules-by-path:setup` walks you through
 them: the deny-list entries above (remove them, or those paths stay
 unreadable), the cache at `~/.claude/cache/rules-by-path`, and your authored

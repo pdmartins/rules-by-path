@@ -158,7 +158,7 @@ inject twice), then delete the old hook/script/skill files.
 
 ## 6. Uninstall / undo
 
-Removing the plugin (`/plugin uninstall rules-by-path@rules-by-path`) removes
+Removing the plugin (`/plugin uninstall rules-by-path@pdmartins`) removes
 the hook and the skills, but three things linger. Walk the user through them:
 
 1. **Deny rules** in `~/.claude/settings.json` — if the hardening was applied,

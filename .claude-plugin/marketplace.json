@@ -1,6 +1,6 @@
 {
-  "name": "rules-by-path",
-  "description": "Marketplace for the rules-by-path plugin: path-scoped rules auto-injected into Claude's context via PreToolUse hook.",
+  "name": "pdmartins",
+  "description": "Pedro Martins' Claude Code plugins. Currently: rules-by-path, path-scoped markdown rules auto-injected into context by a PreToolUse hook.",
   "owner": {
     "name": "Pedro Martins",
     "url": "https://github.com/pdmartins"
@@ -10,7 +10,7 @@
       "name": "rules-by-path",
       "displayName": "Rules by Path",
       "description": "Path-scoped rules for Claude Code: markdown rules auto-injected into context the moment Claude touches a file matching a glob. A scalable replacement for nested CLAUDE.md files.",
-      "version": "1.0.0-beta.2",
+      "version": "1.0.0-beta.3",
       "source": "./",
       "author": {
         "name": "Pedro Martins",
