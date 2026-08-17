@@ -18,15 +18,14 @@ to section 6.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" --help >/dev/null 2>&1 && echo "launcher: ok" || echo "launcher: FAILED — no Python on PATH"
-python3 -c "import yaml" 2>/dev/null && echo "PyYAML: available" || echo "PyYAML: missing (built-in fallback parser will be used)"
 ```
 
 - Launcher failing means no `python3`/`python` on PATH. The hook then stays
   silent instead of erroring on every tool call, but no rules are injected.
   Install Python 3.8+ and re-check. Stop here until fixed.
-- PyYAML missing is NOT an error: the plugin ships a fallback parser for the
-  map format the CLI writes. Only hand-written exotic YAML needs
-  `pip install pyyaml`.
+- The plugin is standard-library only — there is no YAML or other dependency to
+  install. Frontmatter (and, during `migrate`, a legacy map) is parsed by a
+  small built-in parser.
 
 ## 2. Smoke-test the hook
 
@@ -37,13 +36,14 @@ printf '{"tool_name":"Read","tool_input":{"file_path":"%s/setup-probe.txt"},"ses
 
 Expected: `exit=0` and no output (nothing matches a probe file) — or JSON with
 `additionalContext` if a global rule happens to match. A traceback or a
-non-zero exit means a broken installation. Clean up afterwards — the state dir
-is `$CLAUDE_PLUGIN_DATA/state` when that variable is set (the normal case for a
-plugin install), otherwise `~/.claude/cache/rules-by-path`:
+non-zero exit means a broken installation. Clean up afterwards — per-session
+state is one `<session_id>.json` file in `$CLAUDE_PLUGIN_DATA/state` when that
+variable is set (the normal case for a plugin install), otherwise in
+`~/.claude/cache/rules-by-path`:
 
 ```bash
-rm -f "${CLAUDE_PLUGIN_DATA:-$HOME/.claude/cache}"/state/rbp-setup-probe.injected \
-      ~/.claude/cache/rules-by-path/rbp-setup-probe.injected
+rm -f ~/.claude/cache/rules-by-path/rbp-setup-probe.json
+[ -n "$CLAUDE_PLUGIN_DATA" ] && rm -f "$CLAUDE_PLUGIN_DATA/state/rbp-setup-probe.json"
 ```
 
 ## 3. Initialize the global scope (optional)
@@ -80,10 +80,14 @@ adds these to `permissions.deny` in `~/.claude/settings.json`:
 ```json
 "Read(**/.claude/rules-by-path/**)",
 "Edit(**/.claude/rules-by-path/**)",
-"Write(**/.claude/rules-by-path/**)",
-"MultiEdit(**/.claude/rules-by-path/**)",
 "Grep(**/.claude/rules-by-path/**)"
 ```
+
+Only these three, and not `Write(...)`/`MultiEdit(...)`: Claude Code's file
+permission matcher honors `Read` for reads, `Grep` for greps, and a single
+`Edit` rule for *every* file-editing tool — Write, Edit, MultiEdit and
+NotebookEdit alike. A separate `Write(...)` or `MultiEdit(...)` deny entry is
+not matched and makes Claude Code print a warning at startup, so do not add one.
 
 If the user agrees: read `~/.claude/settings.json`, MERGE these entries into the
 existing `permissions.deny` array (create it if absent, keep everything else

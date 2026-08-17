@@ -1,7 +1,10 @@
 #!/bin/sh
-# rules-by-path PreToolUse hook launcher. Exits 0 even when Python is missing:
-# a hook must never block a tool call, and a non-zero exit on every Read would
-# make the plugin unusable instead of merely inactive.
+# rules-by-path PreToolUse hook launcher. ALWAYS exits 0: a hook must never block
+# a tool call, and a non-zero exit on every Read would make the plugin unusable
+# instead of merely inactive. Notably we do NOT `exec` the interpreter — if the
+# hook script were missing or unreadable (a partial install, a moved file),
+# `exec python missing.py` would exit 2, which Claude Code treats as a BLOCKING
+# error. Running it and then forcing exit 0 degrades that to inactive instead.
 SELF=$0
 while [ -L "$SELF" ]; do
     LINK=$(readlink "$SELF")
@@ -10,7 +13,8 @@ done
 DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd) || exit 0
 for PY in python3 python; do
     if command -v "$PY" >/dev/null 2>&1; then
-        exec "$PY" "$DIR/hooks/rules-by-path.py" "$@"
+        "$PY" "$DIR/hooks/rules-by-path.py" "$@"
+        exit 0
     fi
 done
 echo "rules-by-path: no python3/python on PATH; rules are not being injected" >&2

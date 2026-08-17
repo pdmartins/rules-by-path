@@ -60,12 +60,21 @@ MAX_RULE_CHARS = 4_000  # a rule states constraints; it is not documentation
 RULE_WARN_CHARS = 2_000  # `validate` nags above this
 MAX_TOTAL_CHARS = 24_000  # ceiling for one injection
 MAX_RULES_PER_SCOPE = 256
-MAX_FRONTMATTER_BYTES = 4_096
+# The hook only reads this many bytes to find a rule's closing `---`, so the
+# admin must refuse to write a frontmatter larger than this (otherwise a rule it
+# accepts becomes invisible here). Sized to hold the maximum a rule may legally
+# declare: MAX_GLOBS_PER_RULE globs of up to MAX_GLOB_CHARS each, plus keys.
+MAX_FRONTMATTER_BYTES = 8_192
 MAX_GLOB_CHARS = 256
 MAX_GLOBS_PER_RULE = 16
 MAX_RULE_NAME_CHARS = 128
 MAX_SCOPES = 8  # scopes consulted per tool call
 MAX_ANCESTOR_STEPS = 64
+# Total wall-clock a single tool call may spend matching globs. Each glob is
+# polynomial on its own, but a scope may declare thousands of them; this bounds
+# the aggregate so a hostile repo cannot stall every tool call. Fail-open: when
+# hit, the remaining rules are simply not consulted for this call.
+MATCH_BUDGET_SECONDS = 2.0
 STATE_MAX_AGE_SECONDS = 14 * 24 * 3600
 
 # How many hook invocations pass before an already-injected rule is reinforced
@@ -150,6 +159,11 @@ def parse_frontmatter(text, source="rule"):
 
     Returns (fields, body). `fields` maps a key to a string or list of strings.
     """
+    # A leading UTF-8 BOM (Notepad, "UTF-8 with BOM", PowerShell Out-File) would
+    # make the file not start with `---`, so a perfectly good rule would parse to
+    # nothing and be silently ignored. Strip it before the delimiter check.
+    if text[:1] == "﻿":
+        text = text[1:]
     if not text.startswith("---"):
         return {}, text
     lines = text.split("\n")
@@ -196,6 +210,7 @@ def globs_of(fields):
         return []
     values = raw if isinstance(raw, list) else [raw]
     globs = []
+    dropped = 0
     for value in values:
         value = str(value).strip()
         if not value:
@@ -203,9 +218,13 @@ def globs_of(fields):
         if len(value) > MAX_GLOB_CHARS:
             warn(f"glob longer than {MAX_GLOB_CHARS} chars ignored: {value[:64]!r}...")
             continue
-        globs.append(value)
         if len(globs) >= MAX_GLOBS_PER_RULE:
-            break
+            dropped += 1  # kept counting so the warning states how many were lost
+            continue
+        globs.append(value)
+    if dropped:
+        warn(f"more than {MAX_GLOBS_PER_RULE} globs on one rule; {dropped} ignored "
+             f"(these never match — split the rule or remove some globs)")
     return globs
 
 
@@ -481,6 +500,7 @@ def read_rule_file(scope_dir, name, body_limit=MAX_RULE_CHARS):
         return None
     path = os.path.join(scope_dir, name)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    read_limit = MAX_FRONTMATTER_BYTES + body_limit + 1
     try:
         fd = os.open(path, flags)
     except OSError as exc:
@@ -493,7 +513,7 @@ def read_rule_file(scope_dir, name, body_limit=MAX_RULE_CHARS):
             return None
         with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
             fd = None  # fdopen owns it now
-            text = handle.read(MAX_FRONTMATTER_BYTES + body_limit + 1)
+            text = handle.read(read_limit)
     except Exception as exc:
         warn(f"failed reading {path}: {exc}")
         return None
@@ -501,6 +521,13 @@ def read_rule_file(scope_dir, name, body_limit=MAX_RULE_CHARS):
         if fd is not None:
             os.close(fd)
     fields, body = parse_frontmatter(text, name)
+    # A file that opens like a rule but yields no fields, and filled the whole
+    # read window, has a frontmatter with no closing `---` within the limit. The
+    # admin refuses to write one this large, so this only happens to a
+    # hand-edited file — say so instead of silently treating it as a non-rule.
+    if not fields and text.lstrip("﻿").startswith("---") and len(text) >= read_limit:
+        warn(f"rule '{name}': frontmatter exceeds {MAX_FRONTMATTER_BYTES} bytes or "
+             f"has no closing '---'; not treated as a rule")
     body = body.strip()
     if body_limit <= 0:
         return fields, ""  # index pass: the caller only wants the frontmatter
@@ -612,9 +639,26 @@ def open_state(state_path):
             return fd, empty
         if not isinstance(data, dict):
             return fd, empty
-        seen = data.get("seen")
-        return fd, {"calls": int(data.get("calls") or 0),
-                    "seen": seen if isinstance(seen, dict) else {}}
+        # Coerce the shape while the fd is still held, so a value of the wrong
+        # type repairs on the next save instead of dropping the fd (which would
+        # make every tool call re-parse the same corrupt file all session). A
+        # non-int `calls` must not spam full re-injections, and a non-int `seen`
+        # value must not crash `call_number - int(last_seen)` in main() — that
+        # crash aborts the whole injection, taking the user's global rules with
+        # it, on every single tool call until the session ends.
+        try:
+            calls = int(data.get("calls") or 0)
+        except (TypeError, ValueError):
+            calls = 0
+        raw_seen = data.get("seen")
+        seen = {}
+        if isinstance(raw_seen, dict):
+            for entry_key, entry_value in raw_seen.items():
+                try:
+                    seen[entry_key] = int(entry_value)
+                except (TypeError, ValueError):
+                    continue  # drop the unusable entry; next save rewrites clean
+        return fd, {"calls": calls, "seen": seen}
     except Exception as exc:
         warn(f"failed reading state {state_path}: {exc}")
         return None, empty
@@ -663,9 +707,20 @@ def sanitize_label(value):
     """Make an untrusted value safe to interpolate into the authenticated block
     header. Rule names, globs, scope labels and even the touched path can carry
     repository-controlled text; a newline or a bidi control there would let it
-    break out of the header line that the nonce is supposed to authenticate."""
+    break out of the header line that the nonce is supposed to authenticate.
+
+    The header separates fields with ' | ' and names each 'key:'. A value that
+    contained either could forge a field — e.g. a cloned repo whose project
+    directory is named `x | scope: global` would stamp a trusted-scope claim
+    onto its own authentic block. So the separator and the field-name tokens are
+    neutralized here too: the nonce authenticates the line, this keeps the line's
+    field structure trustworthy. A Windows drive-letter ':' in a path survives
+    because only the exact `key:` tokens are touched."""
     text = "".join(ch for ch in str(value)
                    if ch.isprintable() and unicodedata.category(ch) != "Cf")
+    text = text.replace("|", "/")
+    for marker in ("scope:", "glob:", "name:"):
+        text = text.replace(marker, marker[:-1] + " ")
     return text[:200]
 
 
@@ -763,6 +818,8 @@ def collect_candidates(abs_path, scopes):
     rule, listing the first glob that matched so provenance stays specific."""
     candidates = []
     legacy = []
+    deadline = time.monotonic() + MATCH_BUDGET_SECONDS
+    budget_hit = False
     for base_dir, scope_dir, label in scopes:
         if has_legacy_map(scope_dir):
             legacy.append(label)
@@ -770,10 +827,18 @@ def collect_candidates(abs_path, scopes):
         if base_dir is not None:
             rel_path = os.path.relpath(abs_path, base_dir).replace(os.sep, "/")
         for name, fields in scope_index(scope_dir):
+            if time.monotonic() > deadline:
+                budget_hit = True
+                break
             for glob in globs_of(fields):
                 if glob_matches(glob, rel_path, abs_path):
                     candidates.append((scope_dir, label, name, glob, fields))
                     break
+        if budget_hit:
+            break
+    if budget_hit:
+        warn(f"glob matching exceeded {MATCH_BUDGET_SECONDS}s; the remaining rules "
+             f"were skipped for this tool call")
     return candidates, legacy
 
 
@@ -857,20 +922,28 @@ def main():
                            "text": LEGACY_NOTICE, "reminder": False})
             seen[key] = call_number
 
-        save_state(state_fd, state)
         if not blocks:
+            save_state(state_fd, state)  # still advance the reinforcement counter
             return
+        # Emit the injection and flush it BEFORE recording the rules as seen: if
+        # the process dies in the window, the worst case is re-injecting a rule
+        # (a harmless duplicate) rather than marking it delivered when the model
+        # never received it. The design prefers a rare double injection to loss.
+        payload_out = json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": build_context(abs_path, blocks),
+            },
+            "suppressOutput": True,
+        })
+        sys.stdout.write(payload_out)
+        sys.stdout.flush()
+        save_state(state_fd, state)
     finally:
         close_state(state_fd)
+    # Best-effort maintenance, kept off the critical path: it runs after the
+    # payload is delivered so a slow directory sweep can never delay or drop it.
     cleanup_stale_state()
-
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": build_context(abs_path, blocks),
-        },
-        "suppressOutput": True,
-    }))
 
 
 def reset_session():

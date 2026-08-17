@@ -10,7 +10,10 @@ done
 DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd) || exit 0
 for PY in python3 python; do
     if command -v "$PY" >/dev/null 2>&1; then
-        exec "$PY" "$DIR/hooks/rules-by-path.py" --reset-session
+        # Run rather than exec, then exit 0: consistent with the PreToolUse
+        # launcher, a missing script must never surface as a non-zero exit.
+        "$PY" "$DIR/hooks/rules-by-path.py" --reset-session
+        exit 0
     fi
 done
 exit 0

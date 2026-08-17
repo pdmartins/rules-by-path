@@ -117,6 +117,12 @@ reinforce: never
 | `/repos/x/**` | absolute-path prefix (global scope) |
 | `?` | exactly one character; `*` never crosses `/` |
 
+A bare name with no `/` (like `docs` or `Makefile`) is matched two ways: against
+the project-root path (so `docs` covers the root `docs` entry and everything
+under it) **and** against the file's basename at any depth (so `Makefile` catches
+every `Makefile`, and `docs` also matches a file literally named `docs`
+anywhere). To target a `docs/` folder wherever it appears, use `**/docs/**`.
+
 ## Design guarantees
 
 - **Never blocks work**: any internal hook failure goes to stderr and the tool
@@ -177,17 +183,21 @@ guarantees listed above, each covered by a regression test in
   "deny": [
     "Read(**/.claude/rules-by-path/**)",
     "Edit(**/.claude/rules-by-path/**)",
-    "Write(**/.claude/rules-by-path/**)",
-    "MultiEdit(**/.claude/rules-by-path/**)",
     "Grep(**/.claude/rules-by-path/**)"
   ]
 }
 ```
 
+Three entries, not five: Claude Code's permission matcher honors `Read` for
+reads, `Grep` for greps, and a single `Edit` rule for *every* file-editing tool
+— Write, Edit, MultiEdit and NotebookEdit alike. Separate `Write(...)` or
+`MultiEdit(...)` deny entries are not matched and make Claude Code warn at
+startup, so they are deliberately omitted.
+
 With this, the *file tools* can no longer read or rewrite rule files, so rules
 reach context through the hook and changes go through the bundled CLI, which
-validates the map on every write. Reading and updating a rule stay available
-through `rules-by-path show` and `rules-by-path update`.
+validates what it writes. Reading and updating a rule stay available through
+`rules-by-path show` and `rules-by-path update`.
 
 It raises the bar; it is not a sandbox — it constrains Claude's file tools,
 not arbitrary subprocesses. Optional, but it is how the system is meant to run.

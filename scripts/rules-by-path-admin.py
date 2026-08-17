@@ -137,6 +137,23 @@ def rules_in(scope_dir):
     return rules
 
 
+def existing_is_not_a_rule(path):
+    """True when a regular file is already at `path` but carries no frontmatter,
+    i.e. a plain markdown file the user keeps in the scope (a README, notes) that
+    happens to collide with a rule name. Overwriting it would silently destroy
+    the user's own content, and `add`'s 'use --force' message misframes it as a
+    stale rule — so the callers refuse rather than clobber it."""
+    if not os.path.isfile(path) or os.path.islink(path):
+        return False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read(HOOK.MAX_FRONTMATTER_BYTES + 1)
+    except OSError:
+        return False
+    fields, _ = HOOK.parse_frontmatter(text)
+    return not fields
+
+
 OWN_KEYS = {"glob", "globs", "reinforce", "description"}
 
 
@@ -150,22 +167,43 @@ def check_glob(glob):
     return glob
 
 
+def check_line_value(label, value):
+    """A frontmatter value is written verbatim on its own line, so — exactly like
+    a glob — it must not smuggle a newline. Without this, `--reinforce
+    'never\\nglob: **'` would inject a second `glob:` line and silently widen the
+    rule's scope past what the command declared and reported."""
+    text = str(value)
+    if any(ch in text for ch in "\r\n") or not text.isprintable():
+        fail(f"invalid {label} value (one printable line, no control characters): "
+             f"{text[:60]!r}")
+    return text
+
+
 def split_submitted(text):
     """(body, fields) for content arriving on stdin.
 
     `show` prints the whole file, and the skill documents show -> edit ->
     update as the way to change a rule, so stdin routinely arrives WITH the
     frontmatter still attached. Treating it as body text nests one frontmatter
-    inside another and the rule stops matching. The block is only consumed when
-    it parses to this plugin's own keys, so a rule whose body legitimately
-    starts with `---` is left alone."""
+    inside another and the rule stops matching. The block is consumed when it
+    declares a `glob`/`globs` key — the unmistakable signature of this plugin's
+    own frontmatter — so a rule carrying an extra key the admin preserves (e.g.
+    `owner:`) round-trips cleanly, while a body that legitimately starts with
+    `---` (which has no glob key) is left alone."""
     fields, body = HOOK.parse_frontmatter(text)
-    if fields and set(fields) <= OWN_KEYS:
+    if fields and ("glob" in fields or "globs" in fields):
         return body.strip(), fields
     return text.strip(), {}
 
 
 def render_rule(globs, body, reinforce=None, extra=None):
+    # The hook ignores globs past MAX_GLOBS_PER_RULE and reads only
+    # MAX_FRONTMATTER_BYTES to find the closing `---`, so a rule this tool writes
+    # beyond either limit would be one the hook silently never injects. Refuse to
+    # write it here instead, so what `add`/`update` confirm is what actually runs.
+    if len(globs) > HOOK.MAX_GLOBS_PER_RULE:
+        fail(f"a rule may declare at most {HOOK.MAX_GLOBS_PER_RULE} globs "
+             f"(got {len(globs)}); split it into separate rules")
     lines = ["---"]
     if len(globs) == 1:
         lines.append(f"glob: {check_glob(globs[0])}")
@@ -173,14 +211,19 @@ def render_rule(globs, body, reinforce=None, extra=None):
         lines.append("glob:")
         lines.extend(f"  - {check_glob(glob)}" for glob in globs)
     if reinforce:
-        lines.append(f"reinforce: {reinforce}")
+        lines.append(f"reinforce: {check_line_value('reinforce', reinforce)}")
     for key, value in (extra or {}).items():
         if key in ("glob", "globs", "reinforce") or isinstance(value, list):
             continue
-        lines.append(f"{key}: {value}")
+        lines.append(f"{key}: {check_line_value(key, value)}")
     lines.append("---")
     lines.append("")
-    return "\n".join(lines) + body.strip() + "\n"
+    frontmatter = "\n".join(lines)
+    if len(frontmatter.encode("utf-8")) > HOOK.MAX_FRONTMATTER_BYTES:
+        fail(f"frontmatter is {len(frontmatter.encode('utf-8'))} bytes, over the "
+             f"{HOOK.MAX_FRONTMATTER_BYTES}-byte window the hook reads to find the "
+             f"closing '---'; use fewer or shorter globs, or a shorter description")
+    return frontmatter + body.strip() + "\n"
 
 
 def rule_path(scope_dir, name):
@@ -299,6 +342,10 @@ def cmd_add(args):
             f"the name derived from {globs[0]!r} is not usable"
         fail(f"{source}: {name[:60]!r} — pass a plain one, e.g. --rule csharp.md")
     path = rule_path(scope_dir, name)
+    if existing_is_not_a_rule(path):
+        fail(f"{name} already exists and is NOT a rule (no frontmatter); refusing "
+             f"to overwrite a plain markdown file, even with --force. Remove it "
+             f"first, or pass a different --rule")
     if os.path.exists(path) and not args.force:
         fail(f"{name} already exists in this scope; use --force to overwrite, "
              f"`update --rule {name}` to replace its body, or pass another --rule")
@@ -326,6 +373,10 @@ def cmd_update(args):
     if result is None:
         fail(f"cannot read {args.rule}")
     fields = result[0]
+    if not fields:
+        fail(f"{args.rule} is not a rule (no frontmatter); `update` replaces a "
+             f"rule's body. Use `add` to create a rule, choosing a name that does "
+             f"not collide with an existing plain markdown file")
     # Precedence: explicit CLI flag, then what was submitted on stdin, then
     # what the rule already had — so a show -> edit -> update round trip keeps
     # everything the user did not deliberately change.
@@ -426,24 +477,31 @@ def cmd_validate(args):
 
 
 def strip_yaml_comment(line):
-    """Remove a trailing YAML comment, honouring quoted spans. Cutting at the
-    first '#' corrupts a glob that legitimately contains one — the exact bug
-    the old parser shipped, reintroduced here if this is naive."""
+    """Remove a trailing YAML comment, honouring quoted spans and YAML's own
+    comment rule: a '#' only starts a comment when it follows whitespace (or the
+    line start). Two ways a naive version corrupts a migrated glob, both real:
+    treating a mid-value '#' as a comment (`build/#tmp/**` -> `build/`), and
+    letting an apostrophe inside an unquoted value (`a'b/**  # c`) open a quote
+    span that then swallows the genuine trailing comment. A quote is therefore
+    only taken as opening a scalar when it too follows whitespace or the ':'."""
     quote = None
     skip = False
+    prev = " "  # the line start counts as whitespace for both rules below
     for index, char in enumerate(line):
         if skip:
             skip = False
+            prev = char
             continue
         if quote:
             if char == "\\" and quote == '"':
                 skip = True
             elif char == quote:
                 quote = None
-        elif char in "\"'":
+        elif char in "\"'" and prev in " \t:":
             quote = char
-        elif char == "#":
+        elif char == "#" and prev in " \t":
             return line[:index]
+        prev = char
     return line
 
 
@@ -535,7 +593,7 @@ def cmd_migrate(args):
         if glob not in by_name[name]:
             by_name[name].append(glob)
 
-    written, skipped = [], []
+    written, written_names, skipped = [], [], []
     for name, globs in by_name.items():
         if not HOOK.is_valid_rule_name(name):
             skipped.append(f"{name[:60]!r}: not a usable rule file name")
@@ -554,6 +612,7 @@ def cmd_migrate(args):
             continue
         atomic_write(target, render_rule(globs, body))
         written.append(f"{name}  <-  {', '.join(globs)}")
+        written_names.append(name)
 
     for line in written:
         print(f"ok: {line}")
@@ -566,7 +625,12 @@ def cmd_migrate(args):
              "re-run with --force once you have reviewed them")
         return
     os.unlink(map_path)
-    for name in by_name:
+    # Only the legacy files we actually migrated may be removed, and each name in
+    # written_names already passed is_valid_rule_name (no '/', no '..'), so
+    # os.path.join stays inside legacy_dir. Iterating by_name instead would honor
+    # an attacker-controlled `rule:` value like '../../victim' or an absolute
+    # path — os.path.join would escape the scope and unlink an arbitrary file.
+    for name in written_names:
         stale = os.path.join(legacy_dir, name)
         if os.path.isfile(stale) and not os.path.islink(stale):
             os.unlink(stale)

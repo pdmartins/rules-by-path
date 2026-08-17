@@ -124,6 +124,11 @@ with narrower globs.
 | `/repos/x/**` | absolute-path prefix (global scope) |
 | `?` | exactly one character; `*` never crosses `/` |
 
+A bare name with no `/` (e.g. `docs`, `Makefile`) matches both the project-root
+path AND the file's basename at any depth — so `docs` also matches a file named
+`docs` anywhere, not only the root folder. Use `**/docs/**` for a `docs/` folder
+wherever it appears.
+
 ## Listing, validating, removing
 
 ```bash

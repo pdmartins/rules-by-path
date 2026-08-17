@@ -3,9 +3,9 @@
 ## 1.0.0
 
 First public release. `rules-by-path` started as a personal hook + skill and was
-converted into a distributable Claude Code plugin, then put through two rounds
-of multi-agent security review before publication. Every guarantee below is
-covered by a test in `tests/` — `tests/test_security.py` holds one regression
+converted into a distributable Claude Code plugin, then put through several
+rounds of multi-agent security review before publication. Every guarantee below
+is covered by a test in `tests/` — `tests/test_security.py` holds one regression
 per issue those reviews found.
 
 ### What it does
@@ -56,9 +56,11 @@ rule can only inject *its own text*:
   maps in world-writable directories (POSIX only), and is capped at 8 maps per
   tool call.
 - **No pathological input** — glob matching uses a non-backtracking segment
-  matcher rather than a regex. Frontmatter has one small parser with no
-  comment syntax, no anchors and no optional YAML dependency, so there is no
-  second parser to disagree with it and no alias expansion to weaponise.
+  matcher rather than a regex, and total match time per tool call is bounded, so
+  neither one crafted glob nor a scope full of them can stall it. Frontmatter has
+  one small parser with no comment syntax, no anchors and no optional YAML
+  dependency, so there is no second parser to disagree with it and no alias
+  expansion to weaponise. A leading UTF-8 BOM is tolerated.
 - **Fair budget** — global rules are budgeted before project rules, so rules
   arriving with a cloned repo cannot crowd out your own guardrails.
 
