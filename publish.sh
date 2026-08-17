@@ -131,6 +131,30 @@ fi
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 [ "$CURRENT_BRANCH" = "$RELEASE_BRANCH" ] && \
   error "already on $RELEASE_BRANCH. Release from $DEV_BRANCH."
+
+# Getting back to the branch you started on must not depend on the happy path.
+# The release checks out main to merge, and `set -e` means a conflicted merge or
+# a rejected push kills the script right there — leaving you on main, mid-merge,
+# without saying so. This trap runs on every exit, success or failure.
+ORIGINAL_BRANCH="$CURRENT_BRANCH"
+restore_branch() {
+  local status=$?
+  local current
+  current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  { [ -z "$current" ] || [ "$current" = "$ORIGINAL_BRANCH" ]; } && return $status
+  if [ -f "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then
+    # Never abort it silently: an unfinished merge is the user's to resolve,
+    # and throwing it away could discard conflict resolution already done.
+    warn "a merge is still in progress on '$current' — finish it, or run:"
+    warn "    git merge --abort && git checkout $ORIGINAL_BRANCH"
+    return $status
+  fi
+  info "returning to $ORIGINAL_BRANCH (was left on $current)"
+  git checkout "$ORIGINAL_BRANCH" >/dev/null 2>&1 || \
+    warn "could not switch back — you are on '$current'; run: git checkout $ORIGINAL_BRANCH"
+  return $status
+}
+trap restore_branch EXIT
 [ "$CURRENT_BRANCH" = "$DEV_BRANCH" ] || \
   warn "releasing from '$CURRENT_BRANCH', not '$DEV_BRANCH'"
 
@@ -245,7 +269,9 @@ else
   git checkout -b "$RELEASE_BRANCH"   # first release: main starts here
 fi
 git push origin "$RELEASE_BRANCH"
-git checkout "$CURRENT_BRANCH"
+# Tolerant on purpose: the release is public from the line above, so nothing
+# after it may abort the script. The EXIT trap is the backstop if this fails.
+git checkout "$CURRENT_BRANCH" || warn "could not return to $CURRENT_BRANCH"
 success "v$NEW_VERSION is on $RELEASE_BRANCH"
 
 # ─── nothing below may abort: the release is already public ───────────────────
@@ -274,6 +300,10 @@ fi
 
 echo ""
 success "Released v$NEW_VERSION"
+# Checked after the fact, never as a gate: the version number is computed here,
+# so nobody can write the section before knowing what to call it.
+grep -q "^## $NEW_VERSION\b" CHANGELOG.md 2>/dev/null || \
+  warn "CHANGELOG.md has no '## $NEW_VERSION' section yet — add one"
 echo ""
 echo "  Users install it with:"
 echo "    /plugin marketplace add ${REMOTE_SLUG:-<owner/repo>}"
