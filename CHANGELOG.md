@@ -1,17 +1,18 @@
 # Changelog
 
-## 1.0.0 — unreleased
+Versions are `MAJOR.MINOR.REVISION` and change only on a release — that is,
+only when `develop` is merged into `main` by `publish.sh`. Between releases the
+version in `develop` is the last published one, and `0.0.0` means never
+published. To run the current working tree on your own machine you do not need
+a version at all: `bash publish.sh --local` reinstalls it.
 
-Ships as `1.0.0-beta.N` while the review rounds continue; the version becomes
-`1.0.0` at publication. The beta suffix is not cosmetic: `claude plugin update`
-compares declared versions, so a beta that never bumps is a beta that never
-reaches an existing install.
+## Unreleased (0.0.0)
 
-First public release. `rules-by-path` started as a personal hook + skill and was
-converted into a distributable Claude Code plugin, then put through several
-rounds of multi-agent security review before publication. Every guarantee below
-is covered by a test in `tests/` — `tests/test_security.py` holds one regression
-per issue those reviews found.
+Everything below ships in the first public release. `rules-by-path` started as
+a personal hook + skill and was converted into a distributable Claude Code
+plugin, then put through several rounds of multi-agent security review before
+publication. Every guarantee below is covered by a test in `tests/` —
+`tests/test_security.py` holds one regression per issue those reviews found.
 
 ### What it does
 

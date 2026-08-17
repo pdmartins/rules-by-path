@@ -265,6 +265,25 @@ Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directl
 - **Hook errors** are printed to stderr (visible in verbose mode) and never
   block the tool call.
 
+## Development
+
+```bash
+python3 -m unittest discover -s tests    # the suite, standard library only
+claude plugin validate . --strict        # both manifests
+bash publish.sh --local                  # install the working tree on this machine
+```
+
+`--local` reinstalls rather than updating on purpose: the version is
+`MAJOR.MINOR.REVISION` and changes **only** on a release, so `claude plugin
+update` would compare two identical version strings and keep serving the cached
+copy.
+
+`bash publish.sh --minor` (or `--major` / `--revision`) is the release. It
+refuses on a dirty tree, a failing suite or invalid manifests; then it bumps
+both manifests, merges `develop` into `main`, pushes, points GitHub's default
+branch at `main` — `/plugin marketplace add` reads that branch — and refreshes
+the local install. `--dry-run` prints the plan without touching anything.
+
 ## Roadmap
 
 - Adapters for other agents that support pre-tool hooks or rule injection
