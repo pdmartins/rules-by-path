@@ -73,6 +73,15 @@ Every endpoint validates its input and returns ProblemDetails on error.
 A rule can declare several globs, and several rules can share one glob — they
 all inject together.
 
+**Keep a rule to one scope.** Every file a glob matches receives the *whole*
+rule, so constraints that govern different paths belong in different rules. A
+rule saying "controllers look like X, the DI file looks like Y, no file over 300
+lines" under `src/Api/**` tells a controller how DI works and the DI file how
+controllers are shaped; as three rules — `src/Api/**`, `src/Api/Controllers/**`,
+`src/Api/DependencyInjection.cs` — each file gets only what changes what you do
+to it. `add`, `update`, `migrate` and `validate` flag the detectable version of
+this: a rule whose text names a file or folder that exists under its own glob.
+
 From then on, whenever Claude touches anything under `src/api/`, the rule
 appears in its context — once per session, exactly when it matters.
 

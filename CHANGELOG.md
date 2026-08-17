@@ -107,6 +107,13 @@ rule can only inject *its own text*:
   intact.
 - `validate` reports rules that can never fire, empty rules, long rules, globs
   shared by several rules, and a total that exceeds one injection's budget.
+- **Split suggestions.** A rule hands its whole text to every file its glob
+  matches, so `add`, `update`, `migrate` and `validate` flag a rule whose own
+  text names a file or folder living under its glob — "controllers do X, the DI
+  file does Y, nothing over 300 lines" on `src/Api/**` is three rules, and each
+  file should receive only the ones that change what you do to it. The check
+  runs in the CLI, never in the injection path, and only reports names that
+  exist on disk; the manage skill carries the judgement half.
 - Dedup state prefers `${CLAUDE_PLUGIN_DATA}`, falls back to `~/.claude/cache`
   and then a per-uid temp directory, and warns rather than silently
   re-injecting on every call.

@@ -27,6 +27,7 @@ Scope: --root <project-root> (project) or --global (~/.claude).
 
 import argparse
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -38,6 +39,10 @@ LEGACY_RULES_SUBDIR = "rules"
 # the file is repository data and used to be read whole.
 MAX_LEGACY_MAP_BYTES = 256 * 1024
 MAX_ECHOED_NAME_CHARS = 60
+# Bounds for the "should this rule be split?" check (CLI only, never the hook).
+MAX_SCANNED_CHILDREN = 200
+MAX_SPLIT_SUGGESTIONS = 3
+MIN_MENTION_CHARS = 4  # below this a name matches prose by accident
 HOOK_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "hooks", "rules-by-path.py")
 
@@ -356,7 +361,7 @@ def warn_if_long(name, body):
 
 
 def cmd_add(args):
-    scope_dir, _ = scope_for(args)
+    scope_dir, anchor = scope_for(args)
     body, submitted = split_submitted(sys.stdin.read())
     if not body:
         fail("empty rule content — send the markdown via stdin")
@@ -385,11 +390,11 @@ def cmd_add(args):
                                     if k not in OWN_KEYS or k == "description"}))
     print(f"ok: {name}  <-  {', '.join(globs)}")
     warn_if_long(name, body)
-    validate_scope(scope_dir, quiet=True)
+    validate_scope(scope_dir, anchor, quiet=True)
 
 
 def cmd_update(args):
-    scope_dir, _ = scope_for(args)
+    scope_dir, anchor = scope_for(args)
     body, submitted = split_submitted(sys.stdin.read())
     if not body:
         fail("empty rule content — send the markdown via stdin")
@@ -421,7 +426,7 @@ def cmd_update(args):
     atomic_write(path, render_rule(globs, body, reinforce, extra))
     print(f"ok: updated {args.rule}")
     warn_if_long(args.rule, body)
-    validate_scope(scope_dir, quiet=True)
+    validate_scope(scope_dir, anchor, quiet=True)
 
 
 def cmd_remove(args):
@@ -445,9 +450,92 @@ def cmd_remove(args):
     print(f"ok: removed {name}")
 
 
-def validate_scope(scope_dir, quiet=False):
+def glob_base_dir(glob, anchor):
+    """The deepest directory a glob is rooted at, or None.
+
+    `src/Api/**` -> <anchor>/src/Api. Everything from the first segment carrying
+    a metacharacter onwards is dropped, because that is where the glob stops
+    naming a place and starts describing a set."""
+    text = glob.strip()
+    segments = []
+    for segment in text.strip("/").split("/"):
+        if not segment or any(ch in segment for ch in "*?"):
+            break
+        segments.append(segment)
+    if not segments:
+        return None
+    if text.startswith("/"):
+        return "/" + os.path.join(*segments)
+    return os.path.join(anchor, *segments) if anchor else None
+
+
+def targets_one_file(glob):
+    """True when the glob names a single file rather than a set of them."""
+    text = glob.strip().rstrip("/")
+    if any(ch in text for ch in "*?"):
+        return False
+    return "." in os.path.basename(text)
+
+
+def split_candidates(name, globs, body, anchor):
+    """Notes about constraints that look narrower than the rule that carries them.
+
+    The premise of this plugin is that nothing reaches the context until it is
+    relevant, and a rule is the unit of that decision: every file its glob
+    matches receives ALL of it. So a rule that mixes "controllers look like X",
+    "the DI file looks like Y" and "no file over 300 lines" under `src/Api/**`
+    hands two thirds of itself to files that cannot act on it — the first two
+    belong in their own rules, with their own globs.
+
+    Deciding that needs judgement, so this only raises the question, and only on
+    the signal that is actually checkable: the rule's own text naming a path
+    that exists UNDER its glob and is narrower than it. Directory listings stay
+    out of the hook — this runs in the CLI, never in the injection path."""
+    if not body:
+        return []
+    notes = []
+    for glob in globs:
+        if targets_one_file(glob):
+            continue
+        base = glob_base_dir(glob, anchor)
+        if not base or not os.path.isdir(base):
+            continue
+        declared = {segment.lower() for segment in glob.strip("/").split("/")}
+        found = []  # [(name mentioned in the body, glob that would target it)]
+        try:
+            with os.scandir(base) as entries:
+                children = sorted(entries, key=lambda entry: entry.name)[:MAX_SCANNED_CHILDREN]
+        except OSError:
+            continue
+        prefix = glob.strip().split("*")[0].rstrip("/")
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            stem = os.path.splitext(child.name)[0]
+            if len(stem) < MIN_MENTION_CHARS or stem.lower() in declared:
+                continue
+            if not re.search(rf"\b{re.escape(stem)}\b", body, re.IGNORECASE):
+                continue
+            if child.is_dir(follow_symlinks=False):
+                found.append((child.name, f"{prefix}/{child.name}/**"))
+            else:
+                found.append((child.name, f"{prefix}/{child.name}"))
+            if len(found) >= MAX_SPLIT_SUGGESTIONS:
+                break
+        if found:
+            notes.append(
+                f"{name}: mentions {', '.join(repr(mention) for mention, _ in found)}, "
+                f"which live under {glob!r} but are narrower than it. Every file "
+                f"matched by a rule receives the WHOLE rule, so a constraint that "
+                f"only governs those belongs in its own rule: "
+                f"{' / '.join(f'--glob {suggestion!r}' for _, suggestion in found)}")
+    return notes
+
+
+def validate_scope(scope_dir, anchor=None, quiet=False):
     """Print notes and errors; return the number of errors. Notes are advice
-    (a long rule, a shared glob); errors mean something will not work."""
+    (a long rule, a shared glob, a rule that looks like it should be split);
+    errors mean something will not work."""
     if not os.path.isdir(scope_dir):
         if not quiet:
             print("(no rules in this scope — nothing to validate)")
@@ -477,6 +565,7 @@ def validate_scope(scope_dir, quiet=False):
         if unknown:
             notes.append(f"{name}: unknown frontmatter key(s): "
                          f"{', '.join(sorted(unknown))}")
+        notes.extend(split_candidates(name, globs, body, anchor))
     others = other_markdown_in(scope_dir)
     if others:
         notes.append(f"ignored (no frontmatter, so not rules): {', '.join(others)}")
@@ -498,8 +587,8 @@ def validate_scope(scope_dir, quiet=False):
 
 
 def cmd_validate(args):
-    scope_dir, _ = scope_for(args)
-    if validate_scope(scope_dir):
+    scope_dir, anchor = scope_for(args)
+    if validate_scope(scope_dir, anchor):
         sys.exit(1)
 
 
@@ -620,7 +709,7 @@ def cmd_migrate(args):
     The old map is parsed here rather than in the hook: keeping a YAML parser
     alive in the injection path for a one-time job would be a permanent cost,
     and two parsers for one format is exactly what this format change removes."""
-    scope_dir, _ = scope_for(args)
+    scope_dir, anchor = scope_for(args)
     map_path = os.path.join(scope_dir, LEGACY_MAP_NAME)
     legacy_dir = os.path.join(scope_dir, LEGACY_RULES_SUBDIR)
     if os.path.islink(map_path):
@@ -725,6 +814,11 @@ def cmd_migrate(args):
     except OSError:
         warn(f"{legacy_dir} is not empty; left in place for you to review")
     print(f"migrated {len(written_names)} rule(s); the legacy map was removed")
+    # Legacy rules are free-form documents written before globs were per-rule,
+    # so they are the population most likely to need splitting. Say it here,
+    # while the conversion is fresh, rather than leaving it for a `validate`
+    # nobody runs.
+    validate_scope(scope_dir, anchor, quiet=True)
 
 
 def main():

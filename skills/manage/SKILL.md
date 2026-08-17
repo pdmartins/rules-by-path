@@ -117,8 +117,56 @@ rule; a tour of how the module works is not.
 
 Keep it short: the CLI warns above 2,000 characters and the hook truncates at
 4,000. A long rule also makes reinforcement expensive, so it gets repeated less
-usefully. If a rule is growing, it usually wants to be split into two rules
-with narrower globs.
+usefully. If a rule is growing, it usually wants to be split — see below.
+
+## One rule, one scope
+
+Every file a glob matches receives the **whole** rule. So before writing, ask of
+each constraint: *which paths does this actually govern?* Constraints that
+answer differently belong in different rules. This is the plugin's entire
+premise applied one level down — nothing should reach the context until it is
+relevant, and "relevant" is decided per rule.
+
+A worked example. This is three rules wearing one coat:
+
+```markdown
+---
+glob: src/Api/**
+---
+Controllers follow pattern X.
+DependencyInjection.cs follows pattern Y.
+No file may exceed 300 lines.
+```
+
+Touch a controller and you are told how DI registration works; touch the DI file
+and you are told how controllers are shaped. Neither can act on the other's
+constraint, and both pay for it on every session. Split by the paths each
+constraint governs:
+
+| Glob | Constraint |
+|---|---|
+| `src/Api/**` | no file over 300 lines |
+| `src/Api/Controllers/**` | controllers follow pattern X |
+| `src/Api/DependencyInjection.cs` | DI follows pattern Y |
+
+A controller now receives exactly two rules, and both change what you do to it.
+
+Do not over-split either: constraints that govern the *same* paths belong in one
+rule. The test is the path set, never the topic.
+
+`add`, `update`, `migrate` and `validate` flag the obvious version of this — a
+rule whose text names a file or folder that exists under its own glob:
+
+```
+note: src--Api.md: mentions 'Controllers', 'DependencyInjection.cs', which live
+under 'src/Api/**' but are narrower than it. ... belongs in its own rule:
+--glob 'src/Api/Controllers/**' / --glob 'src/Api/DependencyInjection.cs'
+```
+
+That check only sees names that exist on disk, so it catches the common case and
+nothing else — the judgement stays yours. Apply it when updating too: a new
+constraint that governs a narrower path is a new rule, not another bullet on an
+existing one.
 
 ## Glob semantics
 

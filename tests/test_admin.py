@@ -275,3 +275,58 @@ class MigrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitSuggestionTest(unittest.TestCase):
+    """A rule hands its WHOLE text to every file its glob matches, so a rule
+    carrying constraints that govern only part of that tree should be split."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.proj = os.path.join(self.tmp.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(self.proj, "src", "Api", "Controllers"))
+        open(os.path.join(self.proj, "src", "Api", "DependencyInjection.cs"), "w").close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def admin(self, *args, stdin=""):
+        return util.run_admin(list(args), self.home, stdin_text=stdin)
+
+    def test_add_points_at_the_narrower_globs_it_could_use(self):
+        body = ("Controllers follow pattern X.\n"
+                "DependencyInjection.cs follows pattern Y.\n"
+                "No file may exceed 300 lines.\n")
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/Api/**", stdin=body)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        output = proc.stdout + proc.stderr
+        self.assertIn("Controllers", output)
+        self.assertIn("DependencyInjection.cs", output)
+        self.assertIn("src/Api/Controllers/**", output)
+        self.assertIn("src/Api/DependencyInjection.cs", output)
+
+    def test_already_split_rules_say_nothing(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/Api/**",
+                   "--rule", "api-size.md", stdin="No file may exceed 300 lines.\n")
+        self.admin("add", "--root", self.proj, "--glob", "src/Api/Controllers/**",
+                   stdin="One endpoint per method.\n")
+        self.admin("add", "--root", self.proj, "--glob", "src/Api/DependencyInjection.cs",
+                   stdin="Register by assembly scanning.\n")
+        proc = self.admin("validate", "--root", self.proj)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("narrower than it", proc.stdout)
+        self.assertIn("validation ok: 3 rule(s)", proc.stdout)
+
+    def test_a_glob_that_names_one_file_is_never_flagged(self):
+        proc = self.admin("add", "--root", self.proj,
+                          "--glob", "src/Api/DependencyInjection.cs",
+                          stdin="DependencyInjection.cs registers by scanning.\n")
+        self.assertNotIn("narrower than it", proc.stdout + proc.stderr)
+
+    def test_a_name_that_does_not_exist_on_disk_is_not_invented(self):
+        proc = self.admin("add", "--root", self.proj, "--glob", "src/Api/**",
+                          "--rule", "prose.md",
+                          stdin="Repositories must not be called from Handlers.\n")
+        self.assertNotIn("narrower than it", proc.stdout + proc.stderr)
