@@ -27,19 +27,32 @@ Scope: --root <project-root> (project) or --global (~/.claude).
 
 import argparse
 import os
+import stat
 import sys
 import tempfile
 
 RULES_DIR_RELPATH = os.path.join(".claude", "rules-by-path")
 LEGACY_MAP_NAME = "rules-map.yml"
 LEGACY_RULES_SUBDIR = "rules"
+# A legacy map is a list of globs, never a document. The bound matters because
+# the file is repository data and used to be read whole.
+MAX_LEGACY_MAP_BYTES = 256 * 1024
+MAX_ECHOED_NAME_CHARS = 60
 HOOK_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "hooks", "rules-by-path.py")
 
 
+class AdminError(Exception):
+    """A user-facing failure. `main` prints it and exits 1.
+
+    An exception rather than an immediate `sys.exit` so a caller that is in the
+    middle of a multi-entry operation can catch one bad entry, record it and
+    carry on: `migrate` used to die inside its write loop, leaving a scope half
+    converted and reporting none of the files it had already created."""
+
+
 def fail(message):
-    print(f"rules-by-path-admin: {message}", file=sys.stderr)
-    sys.exit(1)
+    raise AdminError(message)
 
 
 def warn(message):
@@ -61,7 +74,11 @@ def load_hook_module():
     return module
 
 
-HOOK = load_hook_module()
+try:
+    HOOK = load_hook_module()
+except AdminError as exc:  # import-time failure: main() is not running yet
+    print(f"rules-by-path-admin: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 
 def scope_for(args):
@@ -228,7 +245,9 @@ def render_rule(globs, body, reinforce=None, extra=None):
 
 def rule_path(scope_dir, name):
     if not HOOK.is_valid_rule_name(name):
-        fail(f"invalid rule name (plain, short '*.md' file names only): {name[:80]!r}")
+        fail(f"invalid rule name: a rule file name may hold only letters, digits "
+             f"and '{HOOK.RULE_NAME_EXTRA_CHARS}', and must end in '.md' "
+             f"(got {name[:80]!r})")
     return os.path.join(scope_dir, name)
 
 
@@ -265,8 +284,16 @@ def cmd_show(args):
         fail(f"no such rule in this scope: {args.rule}")
     # Read the file whole: `show` feeds the show -> edit -> update round trip,
     # so truncating here would silently destroy the tail of a long rule.
-    with open(path, encoding="utf-8") as handle:
-        sys.stdout.write(handle.read())
+    # `errors="replace"` matches every other reader in the plugin: under the
+    # recommended hardening this is the ONLY way to read a rule, so a rule
+    # hand-saved in cp1252 must not turn the sanctioned read path into a
+    # traceback while the hook, `list` and `validate` all read it happily.
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    if "�" in text:
+        warn(f"{args.rule} is not valid UTF-8; undecodable bytes are shown as "
+             f"U+FFFD. An `update` will rewrite the file as UTF-8")
+    sys.stdout.write(text)
 
 
 def cmd_which(args):
@@ -507,8 +534,12 @@ def strip_yaml_comment(line):
 
 def read_legacy_rule(legacy_dir, name):
     """Read one legacy rule file without following a symlink, bounded. The
-    plain open() this replaced was both a TOCTOU window and an unbounded read."""
-    import stat as stat_module
+    plain open() this replaced was both a TOCTOU window and an unbounded read.
+
+    Returns (body, over_limit) or None. The overflow is decided on the raw read,
+    BEFORE stripping: a rule whose 4001st character is whitespace strips back to
+    exactly the limit and would look like a rule that fits. migrate deletes the
+    original, so a body silently cut here is a body lost."""
     path = os.path.join(legacy_dir, name)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -516,11 +547,12 @@ def read_legacy_rule(legacy_dir, name):
     except OSError:
         return None
     try:
-        if not stat_module.S_ISREG(os.fstat(fd).st_mode):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
         with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
             fd = None
-            return handle.read(HOOK.MAX_RULE_CHARS + 1).strip()
+            raw = handle.read(HOOK.MAX_RULE_CHARS + 1)
+        return raw.strip(), len(raw) > HOOK.MAX_RULE_CHARS
     except Exception:
         return None
     finally:
@@ -529,13 +561,35 @@ def read_legacy_rule(legacy_dir, name):
 
 
 def read_legacy_map(map_path):
-    """[(glob, rule_name)] from a legacy map. Tolerant by design: this runs
-    once, and refusing to migrate a slightly odd map helps nobody."""
+    """[(glob, rule_name)] from a legacy map. Tolerant of odd formatting by
+    design — this runs once, and refusing to migrate a slightly odd map helps
+    nobody — but not of an odd *file*.
+
+    Opened exactly like a legacy rule: O_NOFOLLOW, regular file only, bounded.
+    The plain open() this replaced followed symlinks, so a cloned repository
+    could point rules-map.yml at any file the user can read and have its lines
+    come back out through the `skipped <name>` messages — while the hook's own
+    legacy notice actively told the agent to run this command."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        with open(map_path, encoding="utf-8") as handle:
-            lines = handle.read().split("\n")
+        fd = os.open(map_path, flags)
     except OSError as exc:
         fail(f"cannot read {map_path}: {exc}")
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            fd = None
+            fail(f"{map_path} is not a regular file; refusing to read it")
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
+            fd = None  # fdopen owns it now
+            lines = handle.read(MAX_LEGACY_MAP_BYTES).split("\n")
+    except AdminError:
+        raise
+    except Exception as exc:
+        fail(f"cannot read {map_path}: {exc}")
+    finally:
+        if fd is not None:
+            os.close(fd)
     entries = []
     pending = None
     for raw in lines:
@@ -569,6 +623,8 @@ def cmd_migrate(args):
     scope_dir, _ = scope_for(args)
     map_path = os.path.join(scope_dir, LEGACY_MAP_NAME)
     legacy_dir = os.path.join(scope_dir, LEGACY_RULES_SUBDIR)
+    if os.path.islink(map_path):
+        fail(f"{map_path} is a symlink; refusing to read the legacy map through it")
     if not os.path.isfile(map_path):
         print("nothing to migrate: no legacy rules-map.yml in this scope")
         return
@@ -593,36 +649,66 @@ def cmd_migrate(args):
         if glob not in by_name[name]:
             by_name[name].append(glob)
 
-    written, written_names, skipped = [], [], []
+    # Every entry is validated and rendered BEFORE anything is written. Rendering
+    # can fail (too many globs merged onto one legacy rule file, a glob over the
+    # length cap), and failing halfway through the write loop left the scope half
+    # converted, reported none of the files already created, and could not be
+    # resumed — every re-run died on the same entry.
+    prepared, skipped = [], []
     for name, globs in by_name.items():
+        short = name[:MAX_ECHOED_NAME_CHARS]
         if not HOOK.is_valid_rule_name(name):
-            skipped.append(f"{name[:60]!r}: not a usable rule file name")
+            skipped.append(f"{short!r}: not a usable rule file name")
             continue
-        body = read_legacy_rule(legacy_dir, name)
-        if body is None:
+        target = os.path.join(scope_dir, name)
+        # The same refusal `add` makes: a plain markdown file that merely shares
+        # the name is the user's own content, and --force means "replace a rule",
+        # never "replace my notes". The legacy map picks this name, so without
+        # the guard a repository chooses which of your files gets overwritten.
+        if existing_is_not_a_rule(target):
+            skipped.append(f"{name}: a plain markdown file (not a rule) already has "
+                           f"that name; rename it, or migrate this entry by hand")
+            continue
+        if os.path.exists(target) and not args.force:
+            skipped.append(f"{name}: a rule with that name already exists in the new "
+                           f"format (--force replaces it)")
+            continue
+        legacy = read_legacy_rule(legacy_dir, name)
+        if legacy is None:
             skipped.append(f"{name}: rule file missing or unreadable in "
                            f"{LEGACY_RULES_SUBDIR}/")
             continue
+        body, over_limit = legacy
         if not body:
             skipped.append(f"{name}: empty")
             continue
-        target = os.path.join(scope_dir, name)
-        if os.path.exists(target) and not args.force:
-            skipped.append(f"{name}: already exists in the new format (use --force)")
+        if over_limit:
+            skipped.append(f"{name}: longer than the {HOOK.MAX_RULE_CHARS}-char limit; "
+                           f"shorten or split it and migrate this entry by hand "
+                           f"(converting it would cut the text and then delete the "
+                           f"original)")
             continue
-        atomic_write(target, render_rule(globs, body))
-        written.append(f"{name}  <-  {', '.join(globs)}")
-        written_names.append(name)
+        try:
+            rendered = render_rule(globs, body)
+        except AdminError as exc:
+            skipped.append(f"{name}: {exc}")
+            continue
+        prepared.append((name, target, globs, body, rendered))
 
-    for line in written:
-        print(f"ok: {line}")
+    written_names = []
+    for name, target, globs, body, rendered in prepared:
+        atomic_write(target, rendered)
+        written_names.append(name)
+        print(f"ok: {name}  <-  {', '.join(globs)}")  # printed as it happens
+        warn_if_long(name, body)
     for line in skipped:
         warn(f"skipped {line}")
-    if not written:
+    if not written_names:
         fail("nothing was migrated; the legacy files were left untouched")
     if skipped and not args.force:
-        warn("legacy files kept because some entries were skipped; "
-             "re-run with --force once you have reviewed them")
+        warn("legacy files kept because some entries were skipped; resolve those, "
+             "or re-run with --force to replace rules that already exist in the new "
+             "format (--force never overwrites a file that is not a rule)")
         return
     os.unlink(map_path)
     # Only the legacy files we actually migrated may be removed, and each name in
@@ -638,7 +724,7 @@ def cmd_migrate(args):
         os.rmdir(legacy_dir)
     except OSError:
         warn(f"{legacy_dir} is not empty; left in place for you to review")
-    print(f"migrated {len(written)} rule(s); the legacy map was removed")
+    print(f"migrated {len(written_names)} rule(s); the legacy map was removed")
 
 
 def main():
@@ -676,4 +762,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Every failure leaves as one line on stderr and exit 1 — including an
+    # unexpected one. A traceback tells the model driving this CLI nothing it
+    # can act on, and `show` used to emit one for a rule saved in cp1252.
+    try:
+        main()
+    except AdminError as error:
+        print(f"rules-by-path-admin: {error}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as error:  # noqa: BLE001 - deliberate last resort
+        print(f"rules-by-path-admin: unexpected error: {error!r}", file=sys.stderr)
+        sys.exit(1)

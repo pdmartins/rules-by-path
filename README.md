@@ -28,7 +28,10 @@ repo, and the guidance still isn't tied to what the agent actually touches.
 
 The hook also **blocks the creation of nested `CLAUDE.md` files** inside a
 repo (only the project-root `CLAUDE.md` is allowed) and redirects the agent to
-register a path rule instead — the system enforces its own convention.
+register a path rule instead — the system enforces its own convention. A nested
+`CLAUDE.md` that already exists stays editable, and the guard never applies
+above your home directory, so `~/.claude/CLAUDE.md` is untouched even if your
+dotfiles live in a git repository.
 
 ## Install
 
@@ -132,19 +135,31 @@ anywhere). To target a `docs/` folder wherever it appears, use `**/docs/**`.
   injection is capped at 24k, a scope is capped at 256 rules and a glob at 256
   chars, and at most 8 scopes are consulted per tool call.
 - **No pathological matching**: globs are matched by a non-backtracking
-  segment matcher, not a regex, so no glob can burn CPU or stall a tool call.
-  Frontmatter is parsed by one small parser with no comment syntax, anchors or
-  optional YAML dependency — there is no second parser to disagree with.
+  segment matcher, not a regex, so no single glob can blow up. Aggregate cost
+  is bounded by a wall-clock budget *divided among the scopes*, so a scope full
+  of expensive globs can only ever spend its own share — not the repository
+  root's, and not your global rules'. Frontmatter is parsed by one small parser
+  with no comment syntax, anchors or optional YAML dependency — there is no
+  second parser to disagree with.
+- **Symlinks do not change which rule applies**: a file reached through a
+  directory link is matched on both the literal and the resolved path (the
+  resolved one only while it stays inside the same project), so a monorepo
+  alias neither loses a rule nor borrows one.
 - **Stays inside the scope**: `.claude/rules-by-path` must physically live
   inside the project it claims to belong to, rule files are opened without
   following symlinks and must be regular files, and rule names must be plain,
   bounded `*.md` names. A hostile repository cannot reach a private key,
   `/etc`, `/proc/self/environ`, or your global rules.
-- **Bounded trust**: the upward search stops at the repository root, and a map
-  in a world-writable directory (a shared `/tmp`, say) is ignored — a
-  directory you don't control cannot inject instructions into your session.
+- **Bounded trust**: the upward search stops at the repository root, and a
+  rules directory in a world-writable parent (a shared `/tmp`, say) is ignored
+  — a directory you don't control cannot inject instructions into your session.
   The ownership half of that check relies on POSIX permission bits and is not
   enforced on Windows.
+- **The outermost rules always apply**: your global scope is consulted first
+  and the repository-root scope is next, and both keep their slot when the
+  8-scope cap is reached. Nested `.claude/rules-by-path/` directories — which
+  anyone opening a PR can add — cannot crowd out the rules the repository
+  itself declares.
 - **Unforgeable provenance**: each injection carries a random per-call marker,
   and the header states how many blocks legitimately carry it. Rule content
   cannot forge a block claiming to come from a more trusted scope.
@@ -183,16 +198,24 @@ guarantees listed above, each covered by a regression test in
   "deny": [
     "Read(**/.claude/rules-by-path/**)",
     "Edit(**/.claude/rules-by-path/**)",
-    "Grep(**/.claude/rules-by-path/**)"
+    "Read(~/.claude/rules-by-path/**)",
+    "Edit(~/.claude/rules-by-path/**)"
   ]
 }
 ```
 
-Three entries, not five: Claude Code's permission matcher honors `Read` for
-reads, `Grep` for greps, and a single `Edit` rule for *every* file-editing tool
-— Write, Edit, MultiEdit and NotebookEdit alike. Separate `Write(...)` or
-`MultiEdit(...)` deny entries are not matched and make Claude Code warn at
-startup, so they are deliberately omitted.
+Two tools, two anchors. Both halves are counter-intuitive enough to be worth
+stating, and both were verified against Claude Code 2.1.233:
+
+- **`Read` and `Edit` only.** `Read(...)` governs reads *and greps* — the Grep
+  tool checks its `path` argument as a read — so a `Grep(...)` entry is never
+  consulted by anything and sits dead in your settings. `Edit(...)` governs
+  every file-editing tool (Write, Edit, NotebookEdit alike); a separate
+  `Write(...)` entry is not matched and makes Claude Code warn at startup.
+- **Both anchors.** A pattern that does not start with `/` or `~/` is resolved
+  against the current working directory, so the `**/...` pair only covers the
+  project you have open. The `~/`-anchored pair is what protects your **global**
+  rules whenever Claude Code runs in a project outside your home directory.
 
 With this, the *file tools* can no longer read or rewrite rule files, so rules
 reach context through the hook and changes go through the bundled CLI, which

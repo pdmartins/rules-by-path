@@ -54,8 +54,10 @@ validates what it writes.
 - Bash access (`cat`, `sed -i`) does NOT trigger injection; only the five file
   tools do.
 - Scopes: the project chain up to the repository root, plus `~/.claude/rules-by-path/`.
-  The global scope is budgeted first. `<project-root>` is the repository root
-  (`git rev-parse --show-toplevel`), not whatever directory happens to be the cwd.
+  The global scope is budgeted first and the repository-root scope second, so
+  neither can be crowded out by rules in nested directories. `<project-root>` is
+  the repository root (`git rev-parse --show-toplevel`), not whatever directory
+  happens to be the cwd.
 - Changes take effect immediately. No restart.
 
 ## Adding a rule
@@ -66,15 +68,16 @@ validates what it writes.
 2. **Check what already covers the target:**
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --root "<root>" --path <folder-or-file>
+   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --root "<root>" --path '<folder-or-file>'
    ```
 
    It reports rule *file names*. An existing rule about the same concern should
    be updated (step 4); a different concern is a new rule, even for the same glob.
 
 3. **Create it** — body on stdin, name derived from the glob (`src/api/**` →
-   `src--api.md`). For a glob like `*.cs` the derived name would contain a
-   metacharacter, so pass `--rule csharp.md`:
+   `src--api.md`). A rule name may hold only letters, digits and `._-`, so when
+   the derived name would carry anything else (`*.cs` → a metacharacter,
+   `src/@types/**` → an `@`), pass one explicitly: `--rule 'csharp.md'`.
 
    ```bash
    "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" add --root "<root>" \
@@ -89,8 +92,8 @@ validates what it writes.
 4. **Update by name**, never by glob:
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" show   --root "<root>" --rule src--api.md
-   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" update --root "<root>" --rule src--api.md <<'EOF'
+   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" show   --root "<root>" --rule 'src--api.md'
+   "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" update --root "<root>" --rule 'src--api.md' <<'EOF'
    <new body>
    EOF
    ```
@@ -98,8 +101,13 @@ validates what it writes.
    `show` is the sanctioned way to read a rule under the hardening. Read before
    you overwrite: `update` replaces the whole body (it keeps the globs).
 
-   Never paste a glob you read out of a rule back onto a command line — globs
-   are repository data. Rule file names are validated; glob strings are not.
+   **Single-quote every value that came out of a rule** — `--rule 'src--api.md'`,
+   `--glob 'src/api/**'`. Names and globs are repository data that this CLI hands
+   back to you: a rule name is restricted to letters, digits and `._-`, so it
+   cannot carry shell syntax, but a glob is not restricted at all, and `$(...)`
+   and backticks expand inside double quotes just as they do unquoted. Single
+   quotes are always safe here, because neither a name nor a rule this CLI wrote
+   can contain one.
 
 ## Writing a good rule
 
@@ -134,7 +142,7 @@ wherever it appears.
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" list     --root "<root>"
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" validate --root "<root>"
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" remove   --root "<root>" --rule src--api.md
+"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" remove   --root "<root>" --rule 'src--api.md'
 ```
 
 `validate` reports rules that can never fire (no glob), empty rules, and notes
@@ -154,6 +162,8 @@ context. Convert it once:
 
 - Files inside `.claude/rules-by-path/` never trigger injection themselves.
 - Creating a nested CLAUDE.md (below a repo root) is denied by the hook — that
-  is intentional; only the project-root CLAUDE.md is a file.
+  is intentional; only the project-root CLAUDE.md is a file. One that already
+  exists stays editable, and the guard never applies to `~/.claude/CLAUDE.md`
+  (the user's own global instructions), whatever their home directory contains.
 - The hook never blocks a tool call: on any internal failure it warns on stderr
   and stays silent.

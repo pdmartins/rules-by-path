@@ -80,14 +80,23 @@ adds these to `permissions.deny` in `~/.claude/settings.json`:
 ```json
 "Read(**/.claude/rules-by-path/**)",
 "Edit(**/.claude/rules-by-path/**)",
-"Grep(**/.claude/rules-by-path/**)"
+"Read(~/.claude/rules-by-path/**)",
+"Edit(~/.claude/rules-by-path/**)"
 ```
 
-Only these three, and not `Write(...)`/`MultiEdit(...)`: Claude Code's file
-permission matcher honors `Read` for reads, `Grep` for greps, and a single
-`Edit` rule for *every* file-editing tool — Write, Edit, MultiEdit and
-NotebookEdit alike. A separate `Write(...)` or `MultiEdit(...)` deny entry is
-not matched and makes Claude Code print a warning at startup, so do not add one.
+Exactly these four. Two things about Claude Code's permission matcher make the
+obvious alternatives wrong, both verified against 2.1.233:
+
+- **Only `Read` and `Edit` are consulted.** `Read(...)` governs reads *and*
+  greps (the Grep tool checks its `path` argument as a read), so a
+  `Grep(...)` entry is dead weight — it matches nothing and warns about
+  nothing. `Edit(...)` governs every file-editing tool (Write, Edit,
+  NotebookEdit); a separate `Write(...)` or `MultiEdit(...)` entry is not
+  matched and makes Claude Code print a warning at startup. Do not add one.
+- **Both anchors are needed.** A pattern that does not begin with `/` or `~/`
+  is resolved against the current working directory, so `**/...` covers only
+  the project that is open. Without the `~/`-anchored pair, the user's global
+  rules are unprotected whenever they work in a project outside `$HOME`.
 
 If the user agrees: read `~/.claude/settings.json`, MERGE these entries into the
 existing `permissions.deny` array (create it if absent, keep everything else
@@ -137,8 +146,9 @@ Removing the plugin (`/plugin uninstall rules-by-path@rules-by-path`) removes
 the hook and the skills, but three things linger. Walk the user through them:
 
 1. **Deny rules** in `~/.claude/settings.json` — if the hardening was applied,
-   remove the `**/.claude/rules-by-path/**` entries from `permissions.deny`,
-   otherwise those paths stay unreadable with nothing left to serve them.
+   remove every `.claude/rules-by-path/**` entry from `permissions.deny` (both
+   the `**/`- and the `~/`-anchored ones), otherwise those paths stay
+   unreadable with nothing left to serve them.
 2. **Cached state** — `rm -rf ~/.claude/cache/rules-by-path` and, if
    `CLAUDE_PLUGIN_DATA` was in play, that plugin's data directory under
    `~/.claude/plugins/data/`.

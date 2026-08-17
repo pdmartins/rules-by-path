@@ -7,10 +7,17 @@ while [ -L "$SELF" ]; do
     case $LINK in /*) SELF=$LINK ;; *) SELF=$(dirname -- "$SELF")/$LINK ;; esac
 done
 DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd) || exit 1
-for PY in python3 python; do
-    if command -v "$PY" >/dev/null 2>&1; then
-        exec "$PY" "$DIR/scripts/rules-by-path-admin.py" "$@"
-    fi
+# `py` is the Windows launcher, and it belongs here rather than only in the .cmd
+# files: on Windows the hook and the Bash tool both run through git-bash, so this
+# script is what executes there and the .cmd is never reached. Each candidate is
+# also asked to run a trivial program before it is trusted, because Windows ships
+# App-Execution-Alias stubs named python3/python that satisfy `command -v` and
+# then just open the Microsoft Store.
+for PY in python3 python py; do
+    command -v "$PY" >/dev/null 2>&1 || continue
+    if [ "$PY" = "py" ]; then PYARGS="-3"; else PYARGS=""; fi
+    "$PY" $PYARGS -c "" >/dev/null 2>&1 || continue
+    exec "$PY" $PYARGS "$DIR/scripts/rules-by-path-admin.py" "$@"
 done
-echo "rules-by-path: no python3/python found on PATH; install Python 3.8+" >&2
+echo "rules-by-path: no working python3/python/py found on PATH; install Python 3.8+" >&2
 exit 1

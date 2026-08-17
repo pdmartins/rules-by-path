@@ -24,13 +24,18 @@ per issue those reviews found.
   so it never gets the SessionStart reset either.
 - **`SessionStart` hook** (`compact|clear`) — resets the per-session dedup
   state, so rules survive compaction and `/clear`.
-- **Nested-CLAUDE.md guard** — writing a `CLAUDE.md` below the repository root
-  is denied, with guidance to register a path rule instead.
+- **Nested-CLAUDE.md guard** — *creating* a `CLAUDE.md` below the repository
+  root is denied, with guidance to register a path rule instead. One that
+  already exists stays editable, and the guard never applies above your home
+  directory, so `~/.claude/CLAUDE.md` is safe from it.
 - **`rules-by-path:manage` skill** — register, list, show, update and remove
   rules through the bundled CLI.
 - **`rules-by-path:setup` skill** — prerequisites check, hook smoke-test,
   optional permission hardening, migration from a manual install, and an
   uninstall walkthrough.
+- **`/rules-by-path:status` command** — read-only diagnosis: whether the
+  launcher runs, what each scope holds, what `validate` flags, and which rules
+  cover a given path.
 
 ### Security properties
 
@@ -40,34 +45,55 @@ rule can only inject *its own text*:
 
 - **Containment** — a scope directory must physically live inside the root it
   claims (so a symlinked `.claude` or `.claude/rules-by-path` cannot redirect
-  reads, writes or deletes into your global rules); its `rules/` must be a real
-  directory inside it; rule files are opened with `O_NOFOLLOW` and must be
-  regular files; rule names must be plain, bounded `*.md` names. A hostile map
-  cannot reach a private key, `/etc`, or `/proc/self/environ`.
+  reads, writes or deletes into your global rules); during migration both the
+  legacy `rules/` directory and the legacy `rules-map.yml` must be real, in
+  place and unlinked; every file the plugin reads or writes — rules, legacy
+  files, and the session state — is opened with `O_NOFOLLOW` and must be a
+  regular file. A hostile repository cannot reach a private key, `/etc`,
+  `/proc/self/environ`, or your global rules.
+- **Rule names are an allowlist** — letters, digits and `._-`, bounded. A name
+  is repository data that reaches a shell, a filesystem path and the injection
+  header, so `$(...)`, backticks and the full-width lookalikes of `:` and `|`
+  are rejected rather than escaped.
 - **Safe writes** — the CLI writes through `mkstemp` (random name, `O_EXCL`,
   mode 0600) and `os.replace`, so no planted symlink can redirect a write; every
   unlink is gated on a validated rule name, so no map entry can steer a delete.
-- **Unforgeable provenance** — each injection carries a random per-call marker
-  and the header declares how many blocks legitimately carry it. Content that
-  impersonates the plugin's own framing is defanged, and every untrusted value
-  interpolated into a block header (rule name, glob, scope, path) is stripped
-  of control and formatting characters.
+- **Unforgeable provenance** — each injection carries a random per-call marker,
+  declared *before* any repository-controlled text, and states how many blocks
+  legitimately carry it. Block headers are emitted as JSON, so no rule name,
+  glob, scope label or path can close a field and open another; values are also
+  normalized and stripped of control and formatting characters. Content that
+  impersonates the plugin's own framing is defanged wherever it appears in a
+  line, not only at the start.
 - **Bounded trust** — the upward search stops at the repository root, ignores
-  maps in world-writable directories (POSIX only), and is capped at 8 maps per
-  tool call.
+  rules directories in world-writable parents (POSIX only), and consults at
+  most 8 scopes per tool call. When that cap bites, the scopes that survive are
+  the global one and the repository root — never only the deepest ones.
 - **No pathological input** — glob matching uses a non-backtracking segment
-  matcher rather than a regex, and total match time per tool call is bounded, so
-  neither one crafted glob nor a scope full of them can stall it. Frontmatter has
+  matcher rather than a regex, and match time is bounded by a wall-clock budget
+  split evenly across the scopes, so a scope full of expensive globs can stall
+  neither the tool call nor the rules of the scopes above it. Frontmatter has
   one small parser with no comment syntax, no anchors and no optional YAML
   dependency, so there is no second parser to disagree with it and no alias
   expansion to weaponise. A leading UTF-8 BOM is tolerated.
-- **Fair budget** — global rules are budgeted before project rules, so rules
-  arriving with a cloned repo cannot crowd out your own guardrails.
+- **Fair budget** — global rules are budgeted first and repository-root rules
+  second, so rules arriving inside a cloned repo — at any nesting depth —
+  cannot crowd out your own guardrails.
 
 ### Reliability
 
 - Rules are independent files, so no command rewrites a shared index and a
   broken rule never hides the others. Writes are atomic.
+- `migrate` never loses text: it validates and renders every entry before
+  writing any, refuses to overwrite a markdown file that is not a rule (even
+  with `--force`), and skips a legacy rule that would not fit under the size
+  cap rather than converting a cut copy and deleting the original.
+- A file reached through a directory symlink gets the same rules as the file
+  itself, so a monorepo alias neither loses a rule nor borrows one from
+  outside the project.
+- `show` reads a rule that is not valid UTF-8 instead of failing — under the
+  recommended hardening it is the only way to read one — and no command exits
+  with a traceback.
 - Globs containing `#`, quotes, backslashes or non-ASCII characters round-trip
   intact.
 - `validate` reports rules that can never fire, empty rules, long rules, globs
@@ -75,12 +101,17 @@ rule can only inject *its own text*:
 - Dedup state prefers `${CLAUDE_PLUGIN_DATA}`, falls back to `~/.claude/cache`
   and then a per-uid temp directory, and warns rather than silently
   re-injecting on every call.
-- Sessions that match no rule leave no state behind.
+- State files expire after 14 days, and the sweep runs on every invocation —
+  including the far more common ones that inject nothing, which is how a
+  machine that rarely matches a rule used to accumulate one file per session.
 
 ### Portability
 
 - Standard library only, Python 3.8+. No YAML dependency at all.
-- `bin/` launchers resolve `python3`, `python` or the Windows `py` launcher, and
-  work when installed via a symlink on `PATH`.
+- `bin/` launchers resolve `python3`, `python` or the Windows `py` launcher —
+  including the POSIX scripts, which are what git-bash runs on Windows — and
+  each candidate has to execute a trivial program before it is used, so a
+  Microsoft Store alias stub named `python3` is skipped rather than trusted.
+  They work when installed via a symlink on `PATH`.
 - POSIX and Windows file locking. Tested on Linux and macOS; Windows support is
   implemented but not yet verified by the author.

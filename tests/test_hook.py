@@ -183,7 +183,7 @@ class HookEndToEndTest(unittest.TestCase):
         text = self.inject()[1]
         self.assertIn("SECURITY RULE", text)
         self.assertIn("NAMING RULE", text)
-        self.assertEqual(text.count("] name:"), 2)
+        self.assertEqual(text.count('"name":'), 2)
 
     def test_global_scope(self):
         util.write_rule(self.home, "proj.md",
@@ -286,12 +286,12 @@ class ReinforcementTest(unittest.TestCase):
         env = {"RULES_BY_PATH_REINFORCE_EVERY": "3"}
         first = self.touch(env=env)
         self.assertIn("Always validate DTOs.", first)
-        self.assertNotIn("REMINDER", first)
+        self.assertIn('"reminder": false', first)
         self.assertIsNone(self.touch(env=env), "call 2: nothing")
         self.assertIsNone(self.touch(env=env), "call 3: nothing")
         fourth = self.touch(env=env)
         self.assertIsNotNone(fourth, "call 4 is 3 calls after the injection")
-        self.assertIn("REMINDER", fourth)
+        self.assertIn('"reminder": true', fourth)
         self.assertIn("Always validate DTOs.", fourth)
         self.assertNotIn("More detail", fourth, "a reminder is the headline only")
 
@@ -318,7 +318,7 @@ class ReinforcementTest(unittest.TestCase):
         util.write_rule(self.proj, "src.md", "src/**", "VERSION TWO body line")
         text = self.touch(env=env)
         self.assertIn("VERSION TWO", text)
-        self.assertNotIn("REMINDER", text, "a changed rule is new, not a reminder")
+        self.assertIn('"reminder": false', text, "a changed rule is new, not a reminder")
 
 
 if __name__ == "__main__":

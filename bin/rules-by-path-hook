@@ -11,11 +11,14 @@ while [ -L "$SELF" ]; do
     case $LINK in /*) SELF=$LINK ;; *) SELF=$(dirname -- "$SELF")/$LINK ;; esac
 done
 DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd) || exit 0
-for PY in python3 python; do
-    if command -v "$PY" >/dev/null 2>&1; then
-        "$PY" "$DIR/hooks/rules-by-path.py" "$@"
-        exit 0
-    fi
+# See bin/rules-by-path for why `py` is in this list and why each candidate has
+# to prove it runs before being used.
+for PY in python3 python py; do
+    command -v "$PY" >/dev/null 2>&1 || continue
+    if [ "$PY" = "py" ]; then PYARGS="-3"; else PYARGS=""; fi
+    "$PY" $PYARGS -c "" >/dev/null 2>&1 || continue
+    "$PY" $PYARGS "$DIR/hooks/rules-by-path.py" "$@"
+    exit 0
 done
-echo "rules-by-path: no python3/python on PATH; rules are not being injected" >&2
+echo "rules-by-path: no working python3/python/py on PATH; rules are not being injected" >&2
 exit 0
