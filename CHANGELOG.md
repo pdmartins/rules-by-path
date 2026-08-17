@@ -1,6 +1,11 @@
 # Changelog
 
-## 1.0.0
+## 1.0.0 — unreleased
+
+Ships as `1.0.0-beta.N` while the review rounds continue; the version becomes
+`1.0.0` at publication. The beta suffix is not cosmetic: `claude plugin update`
+compares declared versions, so a beta that never bumps is a beta that never
+reaches an existing install.
 
 First public release. `rules-by-path` started as a personal hook + skill and was
 converted into a distributable Claude Code plugin, then put through several
