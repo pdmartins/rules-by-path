@@ -274,6 +274,29 @@ Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directl
 - **Hook errors** are printed to stderr (visible in verbose mode) and never
   block the tool call.
 
+## Repository layout
+
+The plugin is one directory. Everything else in this repository is the
+marketplace that publishes it, or scaffolding that builds and tests it — none
+of which is installed on a user's machine.
+
+```
+.claude-plugin/marketplace.json   the marketplace (this repo is one)
+plugins/
+└── rules-by-path/                THE PLUGIN — this, and only this, is installed
+    ├── .claude-plugin/plugin.json
+    ├── hooks/                    PreToolUse injection + SessionStart
+    ├── bin/                      launchers (POSIX + .cmd), on PATH when installed
+    ├── scripts/                  the management CLI the skills drive
+    ├── skills/                   manage, setup
+    └── commands/                 /rules-by-path:status
+tests/                            development only
+publish.sh                        development only
+README.md  CHANGELOG.md  LICENSE
+```
+
+If it is not under `plugins/rules-by-path/`, Claude Code never sees it.
+
 ## Development
 
 ```bash

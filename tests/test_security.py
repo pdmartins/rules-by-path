@@ -685,7 +685,7 @@ class FifthRoundTest(unittest.TestCase):
         os.makedirs(os.path.join(plugin, "bin"))
         os.makedirs(os.path.join(plugin, "hooks"))  # deliberately empty: no .py
         launcher = os.path.join(plugin, "bin", "rules-by-path-hook")
-        shutil.copy(os.path.join(util.REPO_ROOT, "bin", "rules-by-path-hook"), launcher)
+        shutil.copy(os.path.join(util.PLUGIN_ROOT, "bin", "rules-by-path-hook"), launcher)
         proc = subprocess.run(["/bin/sh", launcher], input="{}",
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -1049,7 +1049,7 @@ class SixthRoundTest(unittest.TestCase):
     # launcher must be in their discovery loop, not only in the .cmd files.
     def test_posix_launchers_try_the_windows_py_launcher(self):
         for name in ("rules-by-path", "rules-by-path-hook", "rules-by-path-reset"):
-            path = os.path.join(util.REPO_ROOT, "bin", name)
+            path = os.path.join(util.PLUGIN_ROOT, "bin", name)
             with open(path, encoding="utf-8") as handle:
                 script = handle.read()
             self.assertIn("py", script.split("for PY in", 1)[1].split("\n", 1)[0],

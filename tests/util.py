@@ -8,8 +8,12 @@ import subprocess
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOOK_PATH = os.path.join(REPO_ROOT, "hooks", "rules-by-path.py")
-ADMIN_PATH = os.path.join(REPO_ROOT, "scripts", "rules-by-path-admin.py")
+# The plugin is one directory of this repository — everything Claude Code
+# installs lives under PLUGIN_ROOT, and everything outside it (this suite,
+# publish.sh) is development scaffolding that never ships.
+PLUGIN_ROOT = os.path.join(REPO_ROOT, "plugins", "rules-by-path")
+HOOK_PATH = os.path.join(PLUGIN_ROOT, "hooks", "rules-by-path.py")
+ADMIN_PATH = os.path.join(PLUGIN_ROOT, "scripts", "rules-by-path-admin.py")
 RULES_DIR_RELPATH = os.path.join(".claude", "rules-by-path")
 
 

@@ -61,7 +61,11 @@ done
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_DIR"
 
-PLUGIN_JSON="$REPO_DIR/.claude-plugin/plugin.json"
+# The repository root is the marketplace plus the development scaffolding; the
+# plugin itself is one directory below, and that directory is exactly what
+# `claude plugin install` copies.
+PLUGIN_DIR="$REPO_DIR/plugins/rules-by-path"
+PLUGIN_JSON="$PLUGIN_DIR/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="$REPO_DIR/.claude-plugin/marketplace.json"
 
 read_json() { python3 -c "import json,sys; print(json.load(open('$1'))$2)"; }
