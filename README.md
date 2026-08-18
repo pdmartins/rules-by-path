@@ -310,6 +310,13 @@ bash publish.sh --local                  # install the working tree on this mach
 update` would compare two identical version strings and keep serving the cached
 copy.
 
+The mode also decides where the install comes from, and the script repoints the
+marketplace to match: a release installs from **GitHub** — exactly what it just
+published, exactly what a user gets — while `--local` installs from **this
+directory**, the only way to run code that is not released yet. The marketplace
+name never changes, so the install id stays `rules-by-path@pdmartins` either way
+and the two can never both be installed.
+
 `bash publish.sh --minor` (or `--major` / `--revision`) is the release. It
 refuses on a dirty tree, a failing suite or invalid manifests; then it bumps
 both manifests, merges `develop` into `main`, pushes, points GitHub's default

@@ -6,9 +6,13 @@ version in `develop` is the last published one, and `0.0.0` means never
 published. To run the current working tree on your own machine you do not need
 a version at all: `bash publish.sh --local` reinstalls it.
 
-## Unreleased (0.0.0)
+## 0.1.0
 
-Everything below ships in the first public release. `rules-by-path` started as
+First release, on `main` but not yet public: the repository stays private while
+the plugin is used and validated in real work. `1.0.0` is the version that goes
+out when it does.
+
+Everything below is what that release contains. `rules-by-path` started as
 a personal hook + skill and was converted into a distributable Claude Code
 plugin, then put through several rounds of multi-agent security review before
 publication. Every guarantee below is covered by a test in `tests/` —

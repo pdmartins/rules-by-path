@@ -9,6 +9,13 @@
 # exist to make `claude plugin update` notice a change, and `--local` below
 # solves that properly by reinstalling instead of comparing version strings.
 #
+# WHERE THE LOCAL INSTALL COMES FROM. The mode decides, and the script repoints
+# the marketplace accordingly: a release installs from GitHub — exactly what it
+# just published, exactly what a user would get — while --local installs from
+# this directory, which is the only way to run code that is not released yet.
+# The marketplace name never changes, so the install id never changes either and
+# the two can never both be installed.
+#
 # Usage:
 #   bash publish.sh --local              refresh this machine's install from the
 #                                        working tree. No git, no version change.
@@ -75,20 +82,60 @@ MARKETPLACE_NAME=$(read_json "$MARKETPLACE_JSON" "['name']")
 INSTALL_ID="${PLUGIN_NAME}@${MARKETPLACE_NAME}"
 CURRENT_VERSION=$(read_json "$PLUGIN_JSON" "['version']")
 
-# ─── refreshing this machine's install ────────────────────────────────────────
-# Shared by --local and by the tail of a release. Uninstall + install rather
-# than `claude plugin update`: update compares declared versions, and this
-# project deliberately keeps the version fixed between releases, so an update
-# would report "already at the latest version" and keep serving a stale cache.
-refresh_local_install() {
-  info "Refreshing the local install of $INSTALL_ID..."
-  export RBP_INSTALL_ID="$INSTALL_ID"
-  if ! claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1; then
-    warn "marketplace '$MARKETPLACE_NAME' not registered here — adding $REPO_DIR"
-    claude plugin marketplace add "$REPO_DIR" || return 1
+# owner/repo, read from the remote rather than hardcoded, so renaming the
+# repository does not need an edit here.
+REMOTE_SLUG=$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null \
+  | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##' || true)
+
+# ─── where the local install comes from ───────────────────────────────────────
+# One marketplace name, two needs, so the MODE picks the source: a release
+# installs what was actually published (GitHub, whose default branch this script
+# points at main), while --local installs the working tree you are editing.
+# Because the name is the same either way, the install id stays the same too, so
+# the two can never coexist and the hook is never registered twice.
+current_marketplace_source() {
+  RBP_MARKETPLACE="$MARKETPLACE_NAME" python3 - <<'PYEOF'
+import json, os
+name = os.environ["RBP_MARKETPLACE"]
+try:
+    with open(os.path.expanduser("~/.claude/settings.json")) as handle:
+        data = json.load(handle)
+except OSError:
+    raise SystemExit
+source = ((data.get("extraKnownMarketplaces") or {}).get(name) or {}).get("source") or {}
+kind = source.get("source", "")
+where = source.get("repo") or source.get("path") or source.get("url") or ""
+if kind:
+    print(f"{kind}:{where}")
+PYEOF
+}
+
+ensure_marketplace() {  # $1 = "github:owner/repo" or "directory:/path"
+  local want="$1" have
+  have=$(current_marketplace_source)
+  if [ "$have" = "$want" ]; then
+    # Already the right source; fetch so a release pushed seconds ago is visible.
+    claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+    return 0
   fi
-  # An install may legitimately be absent; only the install step decides success.
+  if [ -n "$have" ]; then
+    info "marketplace '$MARKETPLACE_NAME' points at ${have%%:*}; repointing at ${want%%:*}"
+    claude plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+  fi
+  claude plugin marketplace add "${want#*:}"
+}
+
+# Uninstall + install rather than `claude plugin update`: update compares
+# declared versions, and this project deliberately keeps the version fixed
+# between releases, so an update would report "already at the latest version"
+# and keep serving a stale cache.
+refresh_local_install() {  # $1 = source spec, as ensure_marketplace takes it
+  info "Refreshing the local install of $INSTALL_ID from ${1%%:*} (${1#*:})..."
+  export RBP_INSTALL_ID="$INSTALL_ID"
+  # Uninstall first: the marketplace cannot be repointed underneath a live
+  # install without leaving the registry pointing at a cache nobody owns.
   claude plugin uninstall "$INSTALL_ID" --scope user >/dev/null 2>&1 || true
+  ensure_marketplace "$1" || return 1
   claude plugin install "$INSTALL_ID" --scope user || return 1
 
   local install_path
@@ -114,13 +161,14 @@ PYEOF
 # ─── --local: no git, no version change ───────────────────────────────────────
 if $LOCAL_ONLY; then
   if $DRY_RUN; then
-    dry "claude plugin marketplace update $MARKETPLACE_NAME  (or 'add $REPO_DIR')"
     dry "claude plugin uninstall $INSTALL_ID --scope user"
+    dry "point marketplace '$MARKETPLACE_NAME' at directory $REPO_DIR (if it is not already)"
     dry "claude plugin install $INSTALL_ID --scope user"
     warn "Dry-run finished — nothing was executed."
     exit 0
   fi
-  refresh_local_install || error "the local refresh failed — see the output above"
+  refresh_local_install "directory:$REPO_DIR" \
+    || error "the local refresh failed — see the output above"
   success "Local install refreshed from the working tree (version $CURRENT_VERSION)."
   echo ""
   echo "  Hooks and commands load at session start: open a NEW session to pick this up."
@@ -131,6 +179,30 @@ fi
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 [ "$CURRENT_BRANCH" = "$RELEASE_BRANCH" ] && \
   error "already on $RELEASE_BRANCH. Release from $DEV_BRANCH."
+
+# Getting back to the branch you started on must not depend on the happy path.
+# The release checks out main to merge, and `set -e` means a conflicted merge or
+# a rejected push kills the script right there — leaving you on main, mid-merge,
+# without saying so. This trap runs on every exit, success or failure.
+ORIGINAL_BRANCH="$CURRENT_BRANCH"
+restore_branch() {
+  local status=$?
+  local current
+  current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  { [ -z "$current" ] || [ "$current" = "$ORIGINAL_BRANCH" ]; } && return $status
+  if [ -f "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then
+    # Never abort it silently: an unfinished merge is the user's to resolve,
+    # and throwing it away could discard conflict resolution already done.
+    warn "a merge is still in progress on '$current' — finish it, or run:"
+    warn "    git merge --abort && git checkout $ORIGINAL_BRANCH"
+    return $status
+  fi
+  info "returning to $ORIGINAL_BRANCH (was left on $current)"
+  git checkout "$ORIGINAL_BRANCH" >/dev/null 2>&1 || \
+    warn "could not switch back — you are on '$current'; run: git checkout $ORIGINAL_BRANCH"
+  return $status
+}
+trap restore_branch EXIT
 [ "$CURRENT_BRANCH" = "$DEV_BRANCH" ] || \
   warn "releasing from '$CURRENT_BRANCH', not '$DEV_BRANCH'"
 
@@ -170,9 +242,6 @@ case "$BUMP" in
   revision) NEW_VERSION="${MAJOR}.${MINOR}.$((REVISION + 1))" ;;
 esac
 
-REMOTE_SLUG=$(git remote get-url origin 2>/dev/null \
-  | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##' || true)
-
 echo ""
 info "Plugin:      $INSTALL_ID"
 info "Branch:      $CURRENT_BRANCH → $RELEASE_BRANCH"
@@ -190,7 +259,8 @@ if $DRY_RUN; then
   if $KEEP_LOCAL; then
     dry "(--keep-local) local install left untouched"
   else
-    dry "refresh the local install (uninstall + install $INSTALL_ID)"
+    dry "reinstall $INSTALL_ID from github:${REMOTE_SLUG:-<none>} — i.e. from what"
+    dry "  was just published, not from this working tree"
   fi
   warn "Dry-run finished — nothing was executed."
   exit 0
@@ -245,7 +315,9 @@ else
   git checkout -b "$RELEASE_BRANCH"   # first release: main starts here
 fi
 git push origin "$RELEASE_BRANCH"
-git checkout "$CURRENT_BRANCH"
+# Tolerant on purpose: the release is public from the line above, so nothing
+# after it may abort the script. The EXIT trap is the backstop if this fails.
+git checkout "$CURRENT_BRANCH" || warn "could not return to $CURRENT_BRANCH"
 success "v$NEW_VERSION is on $RELEASE_BRANCH"
 
 # ─── nothing below may abort: the release is already public ───────────────────
@@ -269,11 +341,22 @@ fi
 if $KEEP_LOCAL; then
   info "--keep-local — this machine's install was left untouched"
 else
-  refresh_local_install || warn "v$NEW_VERSION IS published — only the local refresh failed"
+  if [ -n "$REMOTE_SLUG" ]; then
+    RELEASE_SOURCE="github:$REMOTE_SLUG"
+  else
+    warn "no git remote — falling back to installing the working tree"
+    RELEASE_SOURCE="directory:$REPO_DIR"
+  fi
+  refresh_local_install "$RELEASE_SOURCE" \
+    || warn "v$NEW_VERSION IS published — only the local refresh failed"
 fi
 
 echo ""
 success "Released v$NEW_VERSION"
+# Checked after the fact, never as a gate: the version number is computed here,
+# so nobody can write the section before knowing what to call it.
+grep -q "^## $NEW_VERSION\b" CHANGELOG.md 2>/dev/null || \
+  warn "CHANGELOG.md has no '## $NEW_VERSION' section yet — add one"
 echo ""
 echo "  Users install it with:"
 echo "    /plugin marketplace add ${REMOTE_SLUG:-<owner/repo>}"
