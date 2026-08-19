@@ -16,7 +16,7 @@ Subcommands:
   show   --rule N             print a rule's full content
   which  --path P             which rules cover a path (the hook's own matching)
   add    --glob G [--glob G]  create a rule; markdown body read from stdin
-         [--rule N] [--force] [--reinforce N|never]
+         [--rule N] [--force] [--remember-after 30k|25 calls|never]
   update --rule N             replace a rule's body (stdin), keeping its globs
   remove --rule N | --glob G  delete a rule file
   validate                    check every rule: frontmatter, globs, size, safety
@@ -176,7 +176,20 @@ def existing_is_not_a_rule(path):
     return not fields
 
 
-OWN_KEYS = {"glob", "globs", "reinforce", "description"}
+OWN_KEYS = {"glob", "globs", "remember_after", "description"}
+
+# A rule file name is `Type_what-it-asserts.md`. The type is chosen by what a
+# violation costs — the software is wrong (Business), the code went to the wrong
+# place or shape (Architecture), consistency was lost (Convention) — and it never
+# reaches the model: it is there so a human reading `list` can see what kind of
+# rules a project has accumulated.
+#
+# Checked HERE and nowhere else, deliberately. The CLI is strict because there is
+# a human to tell; the hook stays permissive because dropping a rule someone
+# wrote by hand, over its file name, would be the worst possible behaviour.
+RULE_TYPES = ("Business", "Architecture", "Convention")
+RULE_NAME_CONVENTION = re.compile(
+    r"^(?:%s)_[a-z0-9]+(?:-[a-z0-9]+)*\.md$" % "|".join(RULE_TYPES))
 
 
 def check_glob(glob):
@@ -191,7 +204,7 @@ def check_glob(glob):
 
 def check_line_value(label, value):
     """A frontmatter value is written verbatim on its own line, so — exactly like
-    a glob — it must not smuggle a newline. Without this, `--reinforce
+    a glob — it must not smuggle a newline. Without this, `--remember-after
     'never\\nglob: **'` would inject a second `glob:` line and silently widen the
     rule's scope past what the command declared and reported."""
     text = str(value)
@@ -199,6 +212,21 @@ def check_line_value(label, value):
         fail(f"invalid {label} value (one printable line, no control characters): "
              f"{text[:60]!r}")
     return text
+
+
+def check_remember_after(value):
+    """Refuse a `remember_after` the hook would not honour.
+
+    The CLI is strict where the hook is permissive: a value written by hand into
+    a rule file still loads (silently dropping someone's rule over a typo in an
+    optional field would be the worst outcome), but a value passed to `add` or
+    `update` is checked here, while there is still a human to tell."""
+    if not value:
+        return
+    check_line_value("remember_after", value)  # no smuggled frontmatter line
+    if HOOK.parse_remember_after(value, "remember_after") is None:
+        fail(f"remember_after not understood: {str(value)[:40]!r} — use tokens "
+             f"('30k', '30000'), calls ('25 calls'), or 'never'")
 
 
 def split_submitted(text):
@@ -218,7 +246,7 @@ def split_submitted(text):
     return text.strip(), {}
 
 
-def render_rule(globs, body, reinforce=None, extra=None):
+def render_rule(globs, body, remember_after=None, extra=None):
     # The hook ignores globs past MAX_GLOBS_PER_RULE and reads only
     # MAX_FRONTMATTER_BYTES to find the closing `---`, so a rule this tool writes
     # beyond either limit would be one the hook silently never injects. Refuse to
@@ -232,10 +260,11 @@ def render_rule(globs, body, reinforce=None, extra=None):
     else:
         lines.append("glob:")
         lines.extend(f"  - {check_glob(glob)}" for glob in globs)
-    if reinforce:
-        lines.append(f"reinforce: {check_line_value('reinforce', reinforce)}")
+    if remember_after:
+        lines.append(
+            f"remember_after: {check_line_value('remember_after', remember_after)}")
     for key, value in (extra or {}).items():
-        if key in ("glob", "globs", "reinforce") or isinstance(value, list):
+        if key in ("glob", "globs", "remember_after") or isinstance(value, list):
             continue
         lines.append(f"{key}: {check_line_value(key, value)}")
     lines.append("---")
@@ -338,19 +367,7 @@ def cmd_which(args):
     if matches:
         return
 
-    scope_flag = "--global" if args.use_global else "--root <root>"
-    if os.path.isdir(abs_path) or args.path.endswith("/"):
-        suggestions = [f"{shown.rstrip('/')}/**"]
-    elif not os.path.exists(abs_path) and not looks_like_a_file:
-        # Could be a folder or an extension-less file; suggesting only the
-        # folder form yields a rule that never fires for the file case.
-        suggestions = [f"{shown.rstrip('/')}/**", shown]
-    else:
-        parent = os.path.dirname(shown).replace(os.sep, "/")
-        suggestions = [f"{parent}/**" if parent and parent != "/" else shown]
-    print(f"no rule covers '{shown}' — to create one:")
-    for suggestion in suggestions:
-        print(f"  add {scope_flag} --glob '{suggestion}'")
+    print(f"no rule covers '{shown}'")
 
 
 def warn_if_long(name, body):
@@ -382,10 +399,11 @@ def cmd_add(args):
         fail(f"{name} already exists in this scope; use --force to overwrite, "
              f"`update --rule {name}` to replace its body, or pass another --rule")
     os.makedirs(scope_dir, exist_ok=True)
-    reinforce = args.reinforce or submitted.get("reinforce") or None
-    if isinstance(reinforce, list):
-        reinforce = reinforce[0] if reinforce else None
-    atomic_write(path, render_rule(globs, body, reinforce,
+    remember_after = args.remember_after or submitted.get("remember_after") or None
+    if isinstance(remember_after, list):
+        remember_after = remember_after[0] if remember_after else None
+    check_remember_after(remember_after)
+    atomic_write(path, render_rule(globs, body, remember_after,
                                    {k: v for k, v in submitted.items()
                                     if k not in OWN_KEYS or k == "description"}))
     print(f"ok: {name}  <-  {', '.join(globs)}")
@@ -416,14 +434,15 @@ def cmd_update(args):
              or HOOK.globs_of(submitted) or HOOK.globs_of(fields))
     if not globs:
         fail(f"{args.rule} declares no glob; pass --glob to set one")
-    reinforce = (args.reinforce or submitted.get("reinforce")
-                 or fields.get("reinforce") or None)
-    if isinstance(reinforce, list):
-        reinforce = reinforce[0] if reinforce else None
+    remember_after = (args.remember_after or submitted.get("remember_after")
+                      or fields.get("remember_after") or None)
+    if isinstance(remember_after, list):
+        remember_after = remember_after[0] if remember_after else None
+    check_remember_after(remember_after)
     extra = {k: v for k, v in {**fields, **submitted}.items() if k not in OWN_KEYS}
     if "description" in {**fields, **submitted}:
         extra["description"] = {**fields, **submitted}["description"]
-    atomic_write(path, render_rule(globs, body, reinforce, extra))
+    atomic_write(path, render_rule(globs, body, remember_after, extra))
     print(f"ok: updated {args.rule}")
     warn_if_long(args.rule, body)
     validate_scope(scope_dir, anchor, quiet=True)
@@ -561,11 +580,19 @@ def validate_scope(scope_dir, anchor=None, quiet=False):
             notes.append(f"{name}: {len(body)} chars — a rule should state "
                          f"constraints, not document behaviour (soft limit "
                          f"{HOOK.RULE_WARN_CHARS}, truncated at {HOOK.MAX_RULE_CHARS})")
-        unknown = set(fields) - {"glob", "globs", "reinforce", "description"}
+        unknown = set(fields) - OWN_KEYS
         if unknown:
             notes.append(f"{name}: unknown frontmatter key(s): "
                          f"{', '.join(sorted(unknown))}")
         notes.extend(split_candidates(name, globs, body, anchor))
+    off_convention = [name for name, _f, _b in rules
+                      if not RULE_NAME_CONVENTION.match(name)]
+    if off_convention:
+        notes.append(f"name(s) outside the `Type_what-it-asserts.md` convention: "
+                     f"{', '.join(off_convention)} — the type prefix "
+                     f"({'/'.join(RULE_TYPES)}) says what violating the rule "
+                     f"costs, and the rest should assert what the rule requires. "
+                     f"These still load; renaming is a curation choice")
     others = other_markdown_in(scope_dir)
     if others:
         notes.append(f"ignored (no frontmatter, so not rules): {', '.join(others)}")
@@ -832,7 +859,9 @@ def main():
     parser.add_argument("--glob", action="append", default=[],
                         help="glob the rule applies to; repeat for several")
     parser.add_argument("--rule", help="rule file name")
-    parser.add_argument("--reinforce", help="reminder interval in tool calls, or 'never'")
+    parser.add_argument("--remember-after", dest="remember_after",
+                        help="how far the context may move before the rule is "
+                             "sent again: '30k' (tokens), '25 calls', or 'never'")
     parser.add_argument("--force", action="store_true", help="overwrite an existing rule")
     parser.add_argument("--path", help="file/folder to resolve (which)")
     args = parser.parse_args()

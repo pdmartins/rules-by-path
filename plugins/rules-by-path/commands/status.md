@@ -55,23 +55,34 @@ firing?" definitively. Single-quote the path:
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --global --path '<target>'
 ```
 
-## 5. Reinforcement interval
+## 5. How often rules are repeated, and in what unit
 
 ```bash
-echo "RULES_BY_PATH_REINFORCE_EVERY=${RULES_BY_PATH_REINFORCE_EVERY:-25 (default)}"
+echo "RULES_BY_PATH_REMEMBER_AFTER=${RULES_BY_PATH_REMEMBER_AFTER:-30k (default)}"
+```
+
+The unit actually in use depends on whether the hook can read the session
+transcript: with it, the distance is measured in context tokens; without it, in
+file-tool calls. The most recent state file records which one was used —
+`"seen"` entries hold `[call number, context tokens]`, and a `null` in the
+second slot means the token count was unavailable:
+
+```bash
+ls -t "${CLAUDE_PLUGIN_DATA:-$HOME/.claude/cache}"/rules-by-path/state/*.json \
+  2>/dev/null | head -1 | xargs -r head -c 400
 ```
 
 ## Report
 
 In this order: launcher ok or broken; rule count per scope; anything `validate`
-flagged; which rules cover the queried path (or that none do — pass on the `add`
-suggestion the tool printed); the reinforcement interval.
+flagged; which rules cover the queried path (or that none do); the repeat
+distance and the unit it is being measured in.
 
 Two things worth saying when they apply, because they look like bugs and are
 not:
 
 - a rule injects **once per session per version**, so a correctly configured
   rule that was already delivered will not appear again until it changes or the
-  interval reinforces it;
+  context moves on by its `remember_after` distance;
 - a scope still holding `rules-map.yml` injects nothing at all until
   `/rules-by-path:setup` migrates it.

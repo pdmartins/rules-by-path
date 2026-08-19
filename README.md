@@ -20,18 +20,21 @@ repo, and the guidance still isn't tied to what the agent actually touches.
   frontmatter. There is no index to keep in sync.
 - A `PreToolUse` hook watches `Read`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`.
 - The first time Claude touches a matching file, the rule is injected into
-  context (`additionalContext`) — labeled with its glob and scope.
-- Injection happens **once per rule version per session**, then a one-line
-  **reminder** every N file-tool calls, so a rule does not fade out of a very
-  long context. Editing a rule re-injects it in full immediately.
-- Zero context cost for rules that never become relevant.
+  context (`additionalContext`) — the body, and nothing else:
 
-The hook also **blocks the creation of nested `CLAUDE.md` files** inside a
-repo (only the project-root `CLAUDE.md` is allowed) and redirects the agent to
-register a path rule instead — the system enforces its own convention. A nested
-`CLAUDE.md` that already exists stays editable, and the guard never applies
-above your home directory, so `~/.claude/CLAUDE.md` is untouched even if your
-dotfiles live in a git repository.
+  ```
+  <rules-by-path>
+  Every endpoint must validate its input.
+  ---
+  Never log the request body.
+  </rules-by-path>
+  ```
+
+- Injection happens **once per rule version per session**, then the rule is
+  **sent again, whole**, once the context has moved on by `remember_after`, so
+  it does not fade out of a very long context. Editing a rule re-injects it
+  immediately.
+- Zero context cost for rules that never become relevant.
 
 ## Install
 
@@ -95,25 +98,42 @@ docs/"*, *"update the terraform rule"*.
 | **Project** | `<project-root>/.claude/rules-by-path/` | paths relative to the project root |
 | **Global** | `~/.claude/rules-by-path/` | absolute paths |
 
-Nested projects work: all ancestor projects of a touched file apply, up to the
-repository root. Your global rules are budgeted first, so rules arriving with a
-cloned repo can never crowd them out. Project rules are committed with the
-repo, so the whole team shares them.
+Nested projects work: every `.claude/rules-by-path/` above a touched file
+applies, all the way up to the filesystem root. The walk does not stop at a
+repository boundary, so a git submodule receives its parent repository's rules.
+Your global rules are budgeted first, so rules arriving with a cloned repo can
+never crowd them out. Project rules are committed with the repo, so the whole
+team shares them.
 
-## Reinforcement
+## Repeating a rule
 
-A rule is injected in full the first time it is relevant, then repeated as a
-one-line reminder every 25 file-tool calls. On a long-context session a rule
-injected hundreds of thousands of tokens ago has effectively faded; a short
-reminder costs little and keeps it live.
+A rule is injected the first time it is relevant, then sent again once the
+context has moved on by 30k tokens. On a long-context session a rule injected
+hundreds of thousands of tokens ago has effectively faded.
 
-Set the interval with `RULES_BY_PATH_REINFORCE_EVERY` (`0` disables it), or per
-rule with `reinforce:` in its frontmatter:
+The distance is measured in **context tokens**, read from the session
+transcript — the count the API itself billed. That is the honest unit: a session
+that reads three huge files burns 200k tokens in three tool calls, while one
+doing fifty tiny greps burns 20k in fifty. Where the transcript cannot be read,
+the hook falls back to counting file-tool calls (default 25) and says so in
+`/rules-by-path:status`. There is no conversion between the two units.
+
+There is no short form of a repeat: with no header in the emitted text, there is
+no way to mark a fragment as one, so the whole body is resent. **A short rule is
+a cheap rule.**
+
+A rule is only ever repeated when its glob matches the file being touched. A
+rule governing a folder nobody opens again is never repeated, however long the
+session runs.
+
+Set the default with `RULES_BY_PATH_REMEMBER_AFTER`, or per rule with
+`remember_after:` in its frontmatter — tokens (`30k`, `1M`), calls
+(`25 calls`), or `never`:
 
 ```markdown
 ---
 glob: infra/**
-reinforce: never
+remember_after: 50k
 ---
 ```
 
@@ -159,19 +179,23 @@ anywhere). To target a `docs/` folder wherever it appears, use `**/docs/**`.
   following symlinks and must be regular files, and rule names must be plain,
   bounded `*.md` names. A hostile repository cannot reach a private key,
   `/etc`, `/proc/self/environ`, or your global rules.
-- **Bounded trust**: the upward search stops at the repository root, and a
-  rules directory in a world-writable parent (a shared `/tmp`, say) is ignored
-  — a directory you don't control cannot inject instructions into your session.
-  The ownership half of that check relies on POSIX permission bits and is not
-  enforced on Windows.
+- **Bounded trust**: a rules directory owned by another user, or in a
+  world-writable parent (a shared `/tmp`, say), is ignored. Since the upward
+  search runs to the filesystem root, this ownership check is what stands
+  between you and a rules directory you do not control. It relies on POSIX
+  permission bits and is not enforced on Windows.
 - **The outermost rules always apply**: your global scope is consulted first
-  and the repository-root scope is next, and both keep their slot when the
+  and the outermost project scope next, and both keep their slot when the
   8-scope cap is reached. Nested `.claude/rules-by-path/` directories — which
-  anyone opening a PR can add — cannot crowd out the rules the repository
-  itself declares.
-- **Unforgeable provenance**: each injection carries a random per-call marker,
-  and the header states how many blocks legitimately carry it. Rule content
-  cannot forge a block claiming to come from a more trusted scope.
+  anyone opening a PR can add — cannot crowd out the rules declared above them.
+- **No forgeable provenance, because none is emitted**: the injected text is the
+  rule bodies between a pair of tags. Nothing states a rule's name, glob or
+  scope, so there is no authority claim for content to forge. What content is
+  stopped from doing is closing the block early or impersonating the harness
+  (`<system-reminder>`, `<function_calls>`) — those markers are defanged inside
+  rule bodies. A rule file carries the authority any file in your repository
+  carries; treat one arriving in a clone the way you would treat its
+  `CLAUDE.md`.
 - **Concurrency-safe dedup**: parallel tool calls serialize on a per-session
   lock file, so a simultaneous first touch still injects a rule exactly once.
   The dedup key includes the rule's content, so editing a rule re-injects it

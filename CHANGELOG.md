@@ -6,6 +6,82 @@ version in `develop` is the last published one, and `0.0.0` means never
 published. To run the current working tree on your own machine you do not need
 a version at all: `bash publish.sh --local` reinstalls it.
 
+## Unreleased
+
+**Breaking: the injected text is now the rule bodies and nothing else.**
+
+```
+<rules-by-path>
+Every endpoint must validate its input.
+---
+Never log the request body.
+</rules-by-path>
+```
+
+Gone from what reaches the model: the preamble, the per-rule JSON header, the
+per-invocation marker, and every field that stated where a rule came from
+(`name`, `glob`, `scope`, `reminder`, `truncated`). Measured on one rule in a
+real project, a repeat went from 801 characters to 248 — 33 of them framing.
+
+The reason is not only cost. The marker-and-header scheme authenticated one rule
+block against another, defending against content forging a `scope: global` claim
+to look more trustworthy than its neighbour. That attack only had something to
+win because the plugin emitted authority metadata in the first place. Without
+it, a forged block claims exactly the authority a real one has — which is the
+authority any file in the repository already has when the harness injects its
+`CLAUDE.md`. What is still defended is the boundary: rule content cannot close
+the block early, nor impersonate the harness (`<system-reminder>`,
+`<function_calls>`), nor forge the separator between two rules.
+
+### Also changed
+
+- **Repeats are measured in context tokens**, read from the session transcript —
+  the count the API itself billed. The call count measured the wrong thing: a
+  session that reads three huge files burns 200k tokens in three calls and was
+  never reminded, while fifty tiny greps burned 20k and were reminded twice.
+  Where the transcript cannot be read, the hook falls back to counting file-tool
+  calls and reports which unit is in use. There is no conversion between them.
+- **`reinforce:` becomes `remember_after:`**, taking tokens (`30k`, `1M`), calls
+  (`25 calls`) or `never`; `RULES_BY_PATH_REINFORCE_EVERY` becomes
+  `RULES_BY_PATH_REMEMBER_AFTER`. Units may be mixed in one session, so the
+  state records both measures per rule.
+- **A repeat still requires the glob to match again.** Distance covered is
+  necessary, not sufficient: a rule governing a folder nobody reopens is never
+  repeated.
+- **A repeat resends the whole rule.** With no header there is no way to mark a
+  fragment as one, so the one-line summary is gone — and with it a quiet flaw:
+  only the first line of a rule ever survived a session, so everything after it
+  was seen exactly once. A short rule is now a cheap rule.
+- **The scope walk no longer stops at a repository boundary**, so a git
+  submodule receives its parent repository's rules. Inside a submodule `.git` is
+  a *file*, which halted the walk: a `.cs` under `libs/api/src/` received nothing
+  at all, even with a `**/*.cs` rule at the parent root. The walk now runs to the
+  filesystem root, which makes the ownership and permission check on a scope
+  directory the only thing standing between a session and a rules directory the
+  user does not control.
+- **The nested-`CLAUDE.md` guard is removed.** Whether folder-scoped guidance
+  belongs in a `CLAUDE.md` or in a rule is the user's policy, not the hook's to
+  enforce with a `PreToolUse` deny.
+- **`derive_rule_name` is a total function.** `add --glob` without `--rule` used
+  to fail on `src/**/*.py`, `docs/**/*.md` and `*.cs` — the forms the docs
+  present as the normal path — because wildcards in the middle of a glob reached
+  the name allowlist. Names now join with a single `-`: `src/api/**` derives
+  `src-api.md`, not `src--api.md`.
+- **`which` no longer suggests an `add` command** when nothing matches.
+- **`validate` notes rule names outside the `Type_what-it-asserts.md`
+  convention** — `Business_`, `Architecture_` or `Convention_` by what a
+  violation costs, then what the rule asserts. A note, never an error, and only
+  in the CLI: the hook never refuses a rule over its file name.
+
+## 0.2.0
+
+Packaging, no behaviour change. The plugin became one directory,
+`plugins/rules-by-path/`, so everything Claude Code installs lives under it and
+everything outside it (the test suite, `publish.sh`) is development scaffolding
+that never ships. A release now installs from GitHub; `publish.sh --local`
+installs the working tree, and returns to the branch it started on even when a
+step fails.
+
 ## 0.1.0
 
 First release, on `main` but not yet public: the repository stays private while
