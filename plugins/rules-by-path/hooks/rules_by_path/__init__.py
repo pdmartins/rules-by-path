@@ -1,0 +1,93 @@
+"""rules-by-path — PreToolUse hook for Claude Code.
+
+When Claude touches a file (Read/Edit/Write/MultiEdit/NotebookEdit), this hook
+collects the rules that apply to it and injects them into context via
+`hookSpecificOutput.additionalContext`.
+
+A rule is a single markdown file in `.claude/rules-by-path/` that declares the
+glob it applies to in its own frontmatter:
+
+    ---
+    glob: src/api/**
+    remember_after: 30k
+    ---
+    Every endpoint must validate its input.
+
+Scopes: every `.claude/rules-by-path/` from the touched file's directory up to
+the filesystem root, plus the global scope, `~/.claude/rules-by-path/`.
+
+What reaches the model is the rule bodies and nothing else:
+
+    <rules-by-path>
+    Every endpoint must validate its input.
+    ---
+    Never log the request body.
+    </rules-by-path>
+
+Design constraints:
+- Never blocks the tool call: any internal failure goes to stderr and the hook
+  exits 0 with no stdout.
+- Each rule *version* is injected at most once per session (the dedup key
+  includes a hash of the content, so editing a rule re-injects it), then
+  repeated in full once the context has moved on by `remember_after`.
+- Files inside `.claude/rules-by-path/` never trigger injection.
+- Rule content is untrusted input, and is not dressed up as anything more
+  trustworthy than it is. The emitted text carries no provenance and no
+  authentication: a rule file is exactly as trusted as the repository's
+  CLAUDE.md, which the harness already injects with no ceremony at all. What
+  the plugin does defend is the boundary — content cannot close the block early
+  nor impersonate the harness itself (see `neutralize`).
+- Glob matching is a non-backtracking segment matcher — no regex, hence no
+  catastrophic backtracking on a hostile glob.
+- Standard library only. Frontmatter is parsed by a small parser here, so the
+  plugin has no YAML dependency and no second parser to drift from.
+
+Rules are managed by the `rules-by-path:manage` skill through the companion
+script `scripts/rules-by-path-admin.py` in this plugin.
+
+Layout — one concern per module, none over 400 lines:
+
+    constants.py    every tunable, plus `warn`
+    frontmatter.py  the rule header: parsing, globs, remember_after
+    globbing.py     non-backtracking glob matching
+    discovery.py    which scopes apply, and which are safe to read
+    rules.py        rule names, reading a rule file, indexing a scope
+    state.py        per-session dedup, context size, repeat scheduling
+    context.py      assembling the injected text, defanging forged framing
+    main.py         the three entry points Claude Code calls
+
+This module re-exports the surface the admin CLI and the test suite import.
+`hooks/rules-by-path.py` is the executable facade that Claude Code runs; it
+exists because `hooks.json`, the `bin/` launchers, the admin and the tests all
+address the hook by that path.
+"""
+
+from .constants import (ADMIN_COMMAND, DEFAULT_REMEMBER_CALLS,
+                        DEFAULT_REMEMBER_TOKENS, FILE_PATH_KEYS,
+                        FORGED_FRAMING_TOKENS, LEGACY_MAP_NAME, LEGACY_NOTICE,
+                        MATCH_BUDGET_SECONDS, MAX_ANCESTOR_STEPS,
+                        MAX_FRONTMATTER_BYTES, MAX_GLOB_CHARS,
+                        MAX_GLOBS_PER_RULE, MAX_RULE_CHARS,
+                        MAX_RULE_NAME_CHARS, MAX_RULES_PER_SCOPE, MAX_SCOPES,
+                        MAX_SESSION_ID_CHARS, MAX_TOTAL_CHARS,
+                        MIN_REMEMBER_TOKENS, PLUGIN_ROOT, REMEMBER_ENV_VAR,
+                        RULE_NAME_EXTRA_CHARS, RULE_SEPARATOR, RULE_WARN_CHARS,
+                        RULES_CLOSE_TAG, RULES_DIR_RELPATH, RULES_OPEN_TAG,
+                        SESSION_NOTICE, STATE_MAX_AGE_SECONDS,
+                        TRANSCRIPT_TAIL_BYTES, TRUNCATION_NOTICE, warn)
+from .frontmatter import (globs_of, parse_frontmatter, parse_remember_after,
+                          parse_size, remember_after_default,
+                          remember_after_of, unquote)
+from .globbing import (glob_matches, glob_matches_path, match_path,
+                       match_segment)
+from .discovery import (find_scopes, is_safely_owned, scope_is_contained,
+                        usable_scope)
+from .rules import (derive_rule_name, has_legacy_map, is_valid_rule_name,
+                    read_rule_file, scope_index)
+from .state import (cleanup_stale_state, close_state, coerce_seen_entry,
+                    context_size, is_due, lock_exclusive, open_state,
+                    save_state, state_dir, state_file_for)
+from .context import build_context, neutralize
+from .main import (cli, collect_candidates, extract_file_path,
+                   is_inside_rules_dir, main, path_targets, reset_session,
+                   session_notice)

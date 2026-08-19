@@ -1,5 +1,7 @@
 """Unit and end-to-end tests for hooks/rules-by-path.py."""
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -137,6 +139,36 @@ class FrontmatterTest(unittest.TestCase):
         self.assertEqual(HOOK.remember_after_of({"remember_after": "25 calls"}),
                          (25, "calls"))
 
+    def test_an_explicit_token_unit_below_the_floor_is_not_called_a_typo(self):
+        """`500 tokens` is refused like any sub-minimum value, but the author
+        stated the unit — the "leftover call count" guess does not apply and the
+        message must not send them hunting for a mistake they did not make."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertIsNone(HOOK.remember_after_of({"remember_after": "500 tokens"}))
+        self.assertIn("below the", stderr.getvalue())
+        self.assertNotIn("old format", stderr.getvalue())
+
+    def test_an_out_of_range_size_is_a_parse_failure_not_a_crash(self):
+        """`inf` reaches int() as a float it cannot convert, which raises
+        OverflowError rather than ValueError."""
+        for value in ("inf", "-inf", "1e400"):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertIsNone(HOOK.remember_after_of({"remember_after": value}),
+                                  value)
+            self.assertIn("not understood", stderr.getvalue())
+
+    def test_a_repeated_frontmatter_key_is_reported(self):
+        """The last one wins, as in YAML. Doing it silently makes two `glob:`
+        lines look like two covered paths when they are one."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            fields, _ = HOOK.parse_frontmatter(
+                "---\nglob: src/**\nglob: docs/**\n---\nx")
+        self.assertEqual(HOOK.globs_of(fields), ["docs/**"])
+        self.assertIn("more than once", stderr.getvalue())
+
     def test_sizes_accept_k_and_m_suffixes(self):
         self.assertEqual(HOOK.parse_size("30k"), 30_000)
         self.assertEqual(HOOK.parse_size("1M"), 1_000_000)
@@ -185,6 +217,20 @@ class HookEndToEndTest(unittest.TestCase):
         util.run_hook({"session_id": "s1", "hook_event_name": "SessionStart"},
                       self.home, args=("--reset-session",))
         self.assertIsNotNone(self.inject()[1], "after reset the rule injects again")
+
+    def test_one_rule_with_a_broken_setting_does_not_silence_the_others(self):
+        """A `remember_after` the parser cannot read is a defect in ONE rule.
+        It used to raise out of the per-rule loop, which happens before anything
+        is written to stdout — so the whole injection was lost, including rules
+        from other scopes, on every tool call that reached the bad file."""
+        util.write_rule(self.proj, "a-broken.md", "src/api/**", "BROKEN RULE",
+                        extra_frontmatter=["remember_after: inf"])
+        util.write_rule(self.proj, "b-good.md", "src/api/**", "GOOD RULE",
+                        extra_frontmatter=["remember_after: 1 calls"])
+        self.assertIsNotNone(self.inject()[1], "first touch injects both")
+        proc, text = self.inject()  # second touch: the good rule is due again
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("GOOD RULE", text or "")
 
     def test_non_matching_file_no_output(self):
         util.write_rule(self.proj, "src--api.md", "src/api/**", "API RULE")
