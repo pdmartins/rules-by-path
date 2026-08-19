@@ -105,11 +105,31 @@ def write_rules(root, specs):
     return scope_dir(root)
 
 
-def read_payload(tool, file_path, session="test-session", cwd="/tmp"):
-    return {
+def read_payload(tool, file_path, session="test-session", cwd="/tmp",
+                 transcript_path=None):
+    payload = {
         "tool_name": tool,
         "tool_input": {"file_path": file_path},
         "session_id": session,
         "cwd": cwd,
         "hook_event_name": "PreToolUse",
     }
+    if transcript_path is not None:
+        payload["transcript_path"] = transcript_path
+    return payload
+
+
+def write_transcript(path, *token_totals, model="claude-opus-5"):
+    """A minimal stand-in for the harness's JSONL: one assistant record per
+    entry, each carrying the usage numbers the hook sums to size the context."""
+    with open(path, "w", encoding="utf-8") as handle:
+        for total in token_totals:
+            handle.write(json.dumps({
+                "type": "assistant",
+                "message": {"model": model,
+                            "usage": {"input_tokens": 0,
+                                      "cache_creation_input_tokens": 0,
+                                      "cache_read_input_tokens": total,
+                                      "output_tokens": 0}},
+            }) + "\n")
+    return path

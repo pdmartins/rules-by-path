@@ -66,19 +66,19 @@ Only if the user wants machine-wide rules:
 
 Project scopes are created implicitly by the first `add --root <root>`.
 
-## 3b. Reinforcement interval (optional)
+## 3b. How often a rule is repeated (optional)
 
-A rule is injected in full once per session, then repeated as a one-line
-reminder every 25 file-tool calls. On very long contexts a shorter interval keeps
-rules present; on short sessions it is noise. To change it globally, add to
-`~/.claude/settings.json`:
+A rule is injected once per session, then sent again — whole — once the context
+has moved on by 30k tokens. The distance is measured from the token count in the
+session transcript; where that cannot be read, it falls back to 25 file-tool
+calls. To change the default globally, add to `~/.claude/settings.json`:
 
 ```json
-"env": { "RULES_BY_PATH_REINFORCE_EVERY": "25" }
+"env": { "RULES_BY_PATH_REMEMBER_AFTER": "30k" }
 ```
 
-`0` disables reinforcement. A single rule can override it with `reinforce:` in
-its frontmatter (a number, or `never`).
+The value takes tokens (`30k`, `1M`), calls (`25 calls`), or `never`. A single
+rule overrides it with `remember_after:` in its frontmatter.
 
 ## 4. Recommended hardening (ASK FIRST — edits user settings)
 

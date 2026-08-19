@@ -44,8 +44,8 @@ class AdminTest(unittest.TestCase):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/api/**",
                           stdin="API RULE")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("src--api.md", proc.stdout)
-        content = self.read("src--api.md")
+        self.assertIn("src-api.md", proc.stdout)
+        content = self.read("src-api.md")
         self.assertIn("glob: src/api/**", content)
         self.assertIn("API RULE", content)
 
@@ -106,13 +106,16 @@ class AdminTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("no glob", proc.stderr)
 
-    def test_derived_name_with_metacharacter_needs_explicit_rule(self):
-        proc = self.admin("add", "--root", self.proj, "--glob", "*.cs", stdin="C#")
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("--rule", proc.stderr)
-        proc = self.admin("add", "--root", self.proj, "--glob", "*.cs",
-                          "--rule", "csharp.md", stdin="C#")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+    def test_every_glob_shape_derives_a_usable_name(self):
+        """`add --glob` without `--rule` used to fail on `*.cs`, `src/**/*.py`
+        and every other form with a wildcard in the middle — which is what the
+        docs present as the normal path."""
+        for glob, expected in (("*.cs", "cs.md"),
+                               ("src/**/*.py", "src-py.md"),
+                               ("docs/**/*.md", "docs-md.md")):
+            proc = self.admin("add", "--root", self.proj, "--glob", glob, stdin="X")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(expected, proc.stdout)
 
     def test_unsafe_rule_name_refused(self):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
@@ -125,16 +128,15 @@ class AdminTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("empty rule content", proc.stderr)
 
-    def test_which_reports_matches_and_suggestions(self):
+    def test_which_reports_matches_and_misses(self):
         self.admin("add", "--root", self.proj, "--glob", "src/api/**", stdin="A")
         proc = self.admin("which", "--root", self.proj, "--path", "src/api/users.py")
-        self.assertIn("match: rule src--api.md", proc.stdout)
+        self.assertIn("match: rule src-api.md", proc.stdout)
         os.makedirs(os.path.join(self.proj, "src", "api"), exist_ok=True)
         proc = self.admin("which", "--root", self.proj, "--path", "src/api")
-        self.assertIn("match: rule src--api.md", proc.stdout)
+        self.assertIn("match: rule src-api.md", proc.stdout)
         proc = self.admin("which", "--root", self.proj, "--path", "docs/guide.md")
         self.assertIn("no rule covers", proc.stdout)
-        self.assertIn("docs/**", proc.stdout)
 
     def test_which_outside_root_fails(self):
         proc = self.admin("which", "--root", self.proj, "--path", "/etc/passwd")
@@ -193,10 +195,29 @@ class AdminTest(unittest.TestCase):
             "Read", os.path.join(self.proj, "src", "api", "x.py")), self.home)
         self.assertIn("ROUNDTRIP RULE", util.injected_text(proc))
 
-    def test_reinforce_option_is_written_and_honoured(self):
+    def test_validate_flags_a_name_outside_the_type_convention(self):
         self.admin("add", "--root", self.proj, "--glob", "src/**",
-                   "--reinforce", "never", stdin="RULE")
-        self.assertIn("reinforce: never", self.read("src.md"))
+                   "--rule", "Architecture_handlers-inherit-base.md", stdin="A")
+        proc = self.admin("validate", "--root", self.proj)
+        self.assertNotIn("convention", proc.stdout)
+        self.admin("add", "--root", self.proj, "--glob", "lib/**",
+                   "--rule", "whatever.md", stdin="B")
+        proc = self.admin("validate", "--root", self.proj)
+        self.assertIn("whatever.md", proc.stdout)
+        self.assertIn("convention", proc.stdout)
+        self.assertEqual(proc.returncode, 0, "a name is a note, never an error")
+
+    def test_remember_after_is_written_and_validated(self):
+        self.admin("add", "--root", self.proj, "--glob", "src/**",
+                   "--remember-after", "never", stdin="RULE")
+        self.assertIn("remember_after: never", self.read("src.md"))
+        self.admin("update", "--root", self.proj, "--rule", "src.md",
+                   "--remember-after", "30k", stdin="RULE")
+        self.assertIn("remember_after: 30k", self.read("src.md"))
+        proc = self.admin("add", "--root", self.proj, "--glob", "lib/**",
+                          "--rule", "lib.md", "--remember-after", "soon", stdin="X")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("remember_after not understood", proc.stderr)
 
     def test_nonexistent_root_fails(self):
         proc = self.admin("list", "--root", os.path.join(self.tmp.name, "missing"))

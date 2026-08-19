@@ -1,7 +1,7 @@
 {
   "name": "rules-by-path",
   "displayName": "Rules by Path",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Path-scoped rules for Claude Code: markdown rules auto-injected into context the moment Claude touches a file matching a glob. A scalable replacement for nested CLAUDE.md files — rules load only when relevant, once per session.",
   "author": {
     "name": "Pedro Martins",

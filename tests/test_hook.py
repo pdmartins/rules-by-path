@@ -1,5 +1,6 @@
 """Unit and end-to-end tests for hooks/rules-by-path.py."""
 
+import json
 import os
 import sys
 import tempfile
@@ -63,16 +64,24 @@ class GlobMatchingTest(unittest.TestCase):
 class DeriveRuleNameTest(unittest.TestCase):
     def test_derivations(self):
         cases = {
-            "src/api/**": "src--api.md",
+            "src/api/**": "src-api.md",
             "docs": "docs.md",
             "docs/": "docs.md",
-            "src/config.json": "src--config.json.md",
+            "src/config.json": "src-config-json.md",
             "**/deploy/**": "deploy.md",
-            "/repos/x/**": "repos--x.md",
+            "/repos/x/**": "repos-x.md",
             "**": "root.md",
+            # The forms that used to produce a name the allowlist then refused,
+            # which made `add --glob` fail on the most idiomatic globs of all.
+            "src/**/*.py": "src-py.md",
+            "docs/**/*.md": "docs-md.md",
+            "*.cs": "cs.md",
+            "/repos/_hv/**/*.cs": "repos-hv-cs.md",
+            "docs/architecture.md": "docs-architecture.md",
         }
         for glob, expected in cases.items():
             self.assertEqual(HOOK.derive_rule_name(glob), expected, glob)
+            self.assertTrue(HOOK.is_valid_rule_name(HOOK.derive_rule_name(glob)), glob)
 
 
 class FrontmatterTest(unittest.TestCase):
@@ -109,11 +118,35 @@ class FrontmatterTest(unittest.TestCase):
         fields, _ = HOOK.parse_frontmatter("---\nglob: src/**\nno end marker\n")
         self.assertEqual(HOOK.globs_of(fields), [])
 
-    def test_reinforce_values(self):
-        self.assertEqual(HOOK.reinforce_of({"reinforce": "10"}, 25), 10)
-        self.assertEqual(HOOK.reinforce_of({"reinforce": "never"}, 25), 0)
-        self.assertEqual(HOOK.reinforce_of({}, 25), 25)
-        self.assertEqual(HOOK.reinforce_of({"reinforce": "nonsense"}, 25), 25)
+    def test_remember_after_values(self):
+        self.assertEqual(HOOK.remember_after_of({"remember_after": "30k"}),
+                         (30_000, "tokens"))
+        self.assertEqual(HOOK.remember_after_of({"remember_after": "30000"}),
+                         (30_000, "tokens"))
+        self.assertEqual(HOOK.remember_after_of({"remember_after": "25 calls"}),
+                         (25, "calls"))
+        self.assertEqual(HOOK.remember_after_of({"remember_after": "never"}), (0, None))
+        self.assertIsNone(HOOK.remember_after_of({}))
+        self.assertIsNone(HOOK.remember_after_of({"remember_after": "nonsense"}))
+
+    def test_a_bare_number_too_small_to_be_tokens_is_refused(self):
+        """`remember_after: 25` is far more likely to be a leftover call count
+        than a 25-token budget, and honouring it would repeat the rule on every
+        single tool call."""
+        self.assertIsNone(HOOK.remember_after_of({"remember_after": "25"}))
+        self.assertEqual(HOOK.remember_after_of({"remember_after": "25 calls"}),
+                         (25, "calls"))
+
+    def test_sizes_accept_k_and_m_suffixes(self):
+        self.assertEqual(HOOK.parse_size("30k"), 30_000)
+        self.assertEqual(HOOK.parse_size("1M"), 1_000_000)
+        self.assertEqual(HOOK.parse_size("200000"), 200_000)
+
+    def test_the_default_follows_what_the_session_can_measure(self):
+        self.assertEqual(HOOK.remember_after_default(True),
+                         (HOOK.DEFAULT_REMEMBER_TOKENS, "tokens"))
+        self.assertEqual(HOOK.remember_after_default(False),
+                         (HOOK.DEFAULT_REMEMBER_CALLS, "calls"))
 
 
 class HookEndToEndTest(unittest.TestCase):
@@ -140,7 +173,7 @@ class HookEndToEndTest(unittest.TestCase):
         proc, text = self.inject()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("API RULE CONTENT", text)
-        self.assertIn("src/api/**", text)
+        self.assertNotIn("src/api/**", text, "no provenance is emitted")
         self.assertTrue(util.hook_output(proc).get("suppressOutput"))
         self.assertIsNone(self.inject()[1], "second touch must not re-inject")
         self.assertIsNotNone(self.inject(session="s2")[1], "a new session injects again")
@@ -183,20 +216,23 @@ class HookEndToEndTest(unittest.TestCase):
         text = self.inject()[1]
         self.assertIn("SECURITY RULE", text)
         self.assertIn("NAMING RULE", text)
-        self.assertEqual(text.count('"name":'), 2)
+        self.assertEqual(text.count(f"\n{HOOK.RULE_SEPARATOR}\n"), 1,
+                         "two rules, one separator between them")
 
     def test_global_scope(self):
         util.write_rule(self.home, "proj.md",
                         f"{self.proj}/**".replace(os.sep, "/"), "GLOBAL RULE")
         text = self.inject(rel="anything.txt")[1]
         self.assertIn("GLOBAL RULE", text)
-        self.assertIn("global", text)
 
-    def test_nested_claude_md_write_denied(self):
+    def test_nested_claude_md_write_is_no_longer_blocked(self):
+        """The plugin used to deny creating a CLAUDE.md in a subfolder. That
+        policy belongs to whoever writes the CLAUDE.md, not to this hook."""
         os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
         out = util.hook_output(util.run_hook(
             util.read_payload("Write", self.target("src/CLAUDE.md")), self.home))
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertTrue(out is None or "permissionDecision"
+                        not in out.get("hookSpecificOutput", {}))
 
     def test_root_claude_md_write_allowed(self):
         os.makedirs(os.path.join(self.proj, ".git"), exist_ok=True)
@@ -280,45 +316,131 @@ class ReinforcementTest(unittest.TestCase):
             self.home, env=env)
         return util.injected_text(proc)
 
-    def test_reminder_after_the_configured_number_of_calls(self):
-        util.write_rule(self.proj, "src.md", "src/**",
-                        "Always validate DTOs.\n\nMore detail that need not repeat.")
-        env = {"RULES_BY_PATH_REINFORCE_EVERY": "3"}
+    def test_the_rule_is_sent_again_whole_after_the_configured_distance(self):
+        body = "Always validate DTOs.\n\nMore detail, sent again with the rest."
+        util.write_rule(self.proj, "src.md", "src/**", body)
+        env = {"RULES_BY_PATH_REMEMBER_AFTER": "3 calls"}
         first = self.touch(env=env)
         self.assertIn("Always validate DTOs.", first)
-        self.assertIn('"reminder": false', first)
         self.assertIsNone(self.touch(env=env), "call 2: nothing")
         self.assertIsNone(self.touch(env=env), "call 3: nothing")
         fourth = self.touch(env=env)
         self.assertIsNotNone(fourth, "call 4 is 3 calls after the injection")
-        self.assertIn('"reminder": true', fourth)
-        self.assertIn("Always validate DTOs.", fourth)
-        self.assertNotIn("More detail", fourth, "a reminder is the headline only")
+        self.assertEqual(first, fourth,
+                         "repeating means sending the same text again: with no "
+                         "header there is no way to mark a fragment as one")
 
-    def test_reinforcement_can_be_disabled(self):
+    def test_repetition_can_be_disabled(self):
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.")
-        env = {"RULES_BY_PATH_REINFORCE_EVERY": "0"}
+        env = {"RULES_BY_PATH_REMEMBER_AFTER": "never"}
         self.assertIsNotNone(self.touch(env=env))
         for _ in range(6):
             self.assertIsNone(self.touch(env=env))
 
     def test_per_rule_override_wins(self):
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
-                        extra_frontmatter=["reinforce: never"])
-        env = {"RULES_BY_PATH_REINFORCE_EVERY": "2"}
+                        extra_frontmatter=["remember_after: never"])
+        env = {"RULES_BY_PATH_REMEMBER_AFTER": "2 calls"}
         self.assertIsNotNone(self.touch(env=env))
         for _ in range(5):
             self.assertIsNone(self.touch(env=env))
 
-    def test_edited_rule_reinjects_in_full_not_as_a_reminder(self):
+    def test_a_rule_asking_for_tokens_still_repeats_when_only_calls_can_be_counted(self):
+        """No transcript means no token count. Falling back to the default call
+        distance keeps the rule alive; converting tokens to calls would be a
+        made-up rate, and staying silent would lose the rule for the session."""
+        util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
+                        extra_frontmatter=["remember_after: 30k"])
+        self.assertIsNotNone(self.touch())
+        for _ in range(HOOK.DEFAULT_REMEMBER_CALLS - 1):
+            self.assertIsNone(self.touch())
+        self.assertIsNotNone(self.touch(), "the default call distance applies")
+
+    def test_context_size_reads_the_last_usage_record(self):
+        transcript = os.path.join(self.tmp.name, "session.jsonl")
+        util.write_transcript(transcript, 10_000, 90_000)
+        self.assertEqual(HOOK.context_size({"transcript_path": transcript}), 90_000,
+                         "the LAST record is the current size")
+
+    def test_context_size_degrades_instead_of_failing(self):
+        self.assertIsNone(HOOK.context_size({}))
+        self.assertIsNone(HOOK.context_size({"transcript_path": 42}))
+        missing = os.path.join(self.tmp.name, "gone.jsonl")
+        self.assertIsNone(HOOK.context_size({"transcript_path": missing}))
+        empty = os.path.join(self.tmp.name, "empty.jsonl")
+        open(empty, "w").close()
+        self.assertIsNone(HOOK.context_size({"transcript_path": empty}))
+
+    def test_context_size_reads_only_the_tail_of_a_huge_transcript(self):
+        transcript = os.path.join(self.tmp.name, "big.jsonl")
+        with open(transcript, "w", encoding="utf-8") as handle:
+            handle.write(("{\"filler\": \"" + "x" * 500 + "\"}\n")
+                         * (HOOK.TRANSCRIPT_TAIL_BYTES // 400))
+            handle.write(json.dumps({
+                "message": {"usage": {"input_tokens": 7,
+                                      "cache_read_input_tokens": 120_000}}}) + "\n")
+        self.assertGreater(os.path.getsize(transcript), HOOK.TRANSCRIPT_TAIL_BYTES)
+        self.assertEqual(HOOK.context_size({"transcript_path": transcript}),
+                         120_007)
+
+    def test_the_rule_repeats_once_the_context_has_grown_by_the_token_distance(self):
+        util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
+                        extra_frontmatter=["remember_after: 30k"])
+        transcript = os.path.join(self.tmp.name, "t.jsonl")
+
+        def touch_with(total):
+            util.write_transcript(transcript, total)
+            return util.injected_text(util.run_hook(util.read_payload(
+                "Read", os.path.join(self.proj, "src", "a.py"), session="tok",
+                transcript_path=transcript), self.home))
+
+        self.assertIsNotNone(touch_with(100_000), "first touch injects")
+        self.assertIsNone(touch_with(120_000), "20k later: not yet")
+        self.assertIsNotNone(touch_with(131_000), "31k later: sent again")
+
+    def test_calls_and_tokens_can_be_mixed_in_one_session(self):
+        """Each rule chooses its own unit, so the state records both measures."""
+        util.write_rule(self.proj, "by-tokens.md", "src/**", "TOKEN RULE",
+                        extra_frontmatter=["remember_after: 30k"])
+        util.write_rule(self.proj, "by-calls.md", "src/**", "CALL RULE",
+                        extra_frontmatter=["remember_after: 2 calls"])
+        transcript = os.path.join(self.tmp.name, "mixed.jsonl")
+
+        def touch_with(total):
+            util.write_transcript(transcript, total)
+            return util.injected_text(util.run_hook(util.read_payload(
+                "Read", os.path.join(self.proj, "src", "a.py"), session="mix",
+                transcript_path=transcript), self.home))
+
+        first = touch_with(100_000)
+        self.assertIn("TOKEN RULE", first)
+        self.assertIn("CALL RULE", first)
+        self.assertIsNone(touch_with(101_000), "one call on, no distance covered")
+        third = touch_with(102_000)
+        self.assertIn("CALL RULE", third, "two calls on")
+        self.assertNotIn("TOKEN RULE", third, "only 2k of context on")
+
+    def test_a_rule_is_never_repeated_for_a_file_nobody_touches_again(self):
+        """Distance covered is necessary, not sufficient: the hook only ever
+        asks the question when the rule's glob matched the file at hand."""
+        util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
+                        extra_frontmatter=["remember_after: 1 calls"])
+        self.assertIsNotNone(self.touch())
+        for _ in range(5):
+            util.run_hook(util.read_payload(
+                "Read", os.path.join(self.proj, "elsewhere.txt"), session="r"),
+                self.home)
+        self.assertIsNotNone(self.touch(), "touching a covered file again repeats it")
+
+    def test_edited_rule_is_treated_as_a_new_rule(self):
         util.write_rule(self.proj, "src.md", "src/**", "VERSION ONE")
-        env = {"RULES_BY_PATH_REINFORCE_EVERY": "50"}
+        env = {"RULES_BY_PATH_REMEMBER_AFTER": "50 calls"}
         self.assertIn("VERSION ONE", self.touch(env=env))
         self.assertIsNone(self.touch(env=env))
         util.write_rule(self.proj, "src.md", "src/**", "VERSION TWO body line")
         text = self.touch(env=env)
-        self.assertIn("VERSION TWO", text)
-        self.assertIn('"reminder": false', text, "a changed rule is new, not a reminder")
+        self.assertIn("VERSION TWO", text,
+                      "the content hash is part of the dedup key")
 
 
 if __name__ == "__main__":
