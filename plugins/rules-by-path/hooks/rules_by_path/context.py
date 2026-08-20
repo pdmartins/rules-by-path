@@ -3,7 +3,8 @@ the boundary tags, the separator, and the defanging that keeps rule content
 from forging either."""
 
 from .constants import (FORGED_FRAMING_TOKENS, RULE_SEPARATOR,
-                        RULES_CLOSE_TAG, RULES_OPEN_TAG, TRUNCATION_NOTICE)
+                        RULES_CLOSE_TAG, RULES_OPEN_TAG, SUPERSEDE_NOTICE,
+                        TRUNCATION_NOTICE)
 
 
 def neutralize(content):
@@ -51,9 +52,14 @@ def build_context(blocks):
     bodies = []
     for block in blocks:
         body = neutralize(block["text"])
+        # Both notices are added AFTER defanging, so a forged one inside the
+        # body is already broken and only these survive intact. Supersede goes
+        # first (it is about the version the reader is about to read), the
+        # truncation notice last (it is about where that version stops) — a
+        # fixed order regardless of which combination of the two applies.
+        if block.get("superseded"):
+            body = f"{SUPERSEDE_NOTICE}\n\n{body}"
         if block.get("truncated"):
-            # Appended AFTER defanging, so a forged notice inside the body is
-            # already broken and only this one survives intact.
             body += TRUNCATION_NOTICE
         bodies.append(body)
     separator = f"\n{RULE_SEPARATOR}\n"

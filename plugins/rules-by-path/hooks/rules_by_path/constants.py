@@ -14,10 +14,21 @@ ADMIN_COMMAND = os.path.join(PLUGIN_ROOT, "bin", "rules-by-path")
 RULES_DIR_RELPATH = os.path.join(".claude", "rules-by-path")
 LEGACY_MAP_NAME = "rules-map.yml"
 FILE_PATH_KEYS = ("file_path", "notebook_path", "path")
+# The only tools `enforce: deny` ever acts on. Read/Grep never write, so an
+# enforce rule has nothing to deny them from doing.
+WRITE_TOOL_NAMES = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
+# How long a rule may be. Both are defaults: `config.json` may set `rule_size`
+# per user and per project (see config.py). A rule is resent WHOLE every time it
+# is repeated, so length is paid again at every reminder — which is why the hard
+# cut exists at all, and why the soft one nags well below it.
 MAX_RULE_CHARS = 4_000  # a rule states constraints; it is not documentation
 RULE_WARN_CHARS = 2_000  # `validate` nags above this
 MAX_TOTAL_CHARS = 24_000  # ceiling for one injection
+# A configured limit is clamped to this range. The ceiling is one injection's
+# budget: a single rule allowed to exceed it could never be delivered whole. The
+# floor is small enough for a one-line rule and large enough not to be a trap.
+MIN_CONFIGURABLE_RULE_CHARS = 200
 MAX_RULES_PER_SCOPE = 256
 # The hook only reads this many bytes to find a rule's closing `---`, so the
 # admin must refuse to write a frontmatter larger than this (otherwise a rule it
@@ -42,7 +53,7 @@ STATE_MAX_AGE_SECONDS = 14 * 24 * 3600
 # How far the context may move on before an already-injected rule is repeated.
 # Long-context models drift away from a rule injected hundreds of thousands of
 # tokens ago, and a session that never compacts never gets the SessionStart
-# reset. `remember_after: never` disables the repeat for one rule.
+# reset. `remember_again_after: never` disables the repeat for one rule.
 #
 # Tokens are the honest unit: a session that reads three huge files burns 200k
 # tokens in 3 tool calls, while one doing 50 tiny greps burns 20k in 50 — the
@@ -50,14 +61,60 @@ STATE_MAX_AGE_SECONDS = 14 * 24 * 3600
 # transcript cannot be read, and there is no conversion between the two: no
 # faithful tokens-per-call rate exists, and faking precision is worse than
 # losing it.
-DEFAULT_REMEMBER_TOKENS = 30_000
-DEFAULT_REMEMBER_CALLS = 25
-REMEMBER_ENV_VAR = "RULES_BY_PATH_REMEMBER_AFTER"
-# A bare number below this is read as a leftover from the call-counting era
-# (`remember_after: 25`) rather than as an absurdly small token budget.
-MIN_REMEMBER_TOKENS = 1_000
+#
+# These two are the LAST-RESORT fallback, not the shipped default: the default
+# lives in the plugin's config.json, which the user's and the project's own
+# config may override (see config.py). They are what the plugin falls back to
+# when that file is missing or unreadable, so the hook keeps working with no
+# configuration at all.
+DEFAULT_REMEMBER_AGAIN_TOKENS = 30_000
+DEFAULT_REMEMBER_AGAIN_CALLS = 25
+REMEMBER_AGAIN_ENV_VAR = "RULES_BY_PATH_REMEMBER_AGAIN_AFTER"
+# The name this setting carried until 0.4.0, still honoured so an installation
+# that exported it keeps the behaviour it configured.
+LEGACY_REMEMBER_ENV_VAR = "RULES_BY_PATH_REMEMBER_AFTER"
+# Floors for the repeat interval. A bare number below the token floor is read as
+# a leftover from the call-counting era (`remember_again_after: 25`) rather than
+# as an absurdly small token budget; the call floor exists so a config arriving
+# with a cloned repository cannot ask for a repeat on nearly every tool call.
+MIN_REMEMBER_AGAIN_TOKENS = 1_000
+MIN_REMEMBER_AGAIN_CALLS = 5
 # Only the tail of the transcript is read to find the last usage record.
 TRANSCRIPT_TAIL_BYTES = 64 * 1024
+
+# A token drop bigger than this is compaction/clear having won the race
+# against the async SessionStart reset, not ordinary reporting jitter.
+TOKEN_REGRESSION_SLACK = 4_096
+
+# How many times a rule may be RE-injected in one session, after its first
+# delivery — the first injection is free, only repeats spend this budget. Each
+# re-injection adds one more instruction to the pile competing for the model's
+# attention, which is itself the variable long-context collapse tracks
+# (arXiv:2608.02639), so a rule that would otherwise repeat for the rest of a
+# very long session is cut off instead. This is the LAST-RESORT fallback, not
+# the shipped default: `config.json`'s `reinject_budget` (see reinject.py) is
+# what actually ships, and may be overridden per user and per project.
+MAX_REINJECTIONS_PER_RULE = 3
+# The hard ceiling `reinject_budget` may be configured to, in EITHER layer.
+# Unlike rule_size, there is no direction in which raising this number is safe
+# to leave unclamped even for the user's own file — a session repeating one
+# rule without limit is exactly the failure this budget exists to prevent — so
+# both layers are held to the same range.
+MAX_CONFIGURABLE_REINJECT_BUDGET = 20
+
+# The configuration file, looked up in three layers: this plugin's own (the
+# shipped default), then `~/.claude/rules-by-path/`, then each project scope.
+# It sits beside the rules, and the hook only ever reads `*.md` as a rule, so it
+# cannot be mistaken for one.
+CONFIG_FILE_NAME = "config.json"
+PLUGIN_CONFIG_PATH = os.path.join(PLUGIN_ROOT, CONFIG_FILE_NAME)
+MAX_CONFIG_BYTES = 32 * 1024
+MAX_RULE_TYPES = 16
+# `name` and `purpose` are echoed to a terminal and to the model (by `config`,
+# and by the error `add` prints when the type is missing), so they are bounded
+# and kept to one printable line — the same treatment a glob gets.
+MAX_TYPE_TEXT_CHARS = 120
+MAX_TYPE_PREFIX_CHARS = 8
 
 # The characters a rule file name may carry besides letters and digits. This is
 # an allowlist on purpose — see is_valid_rule_name.
@@ -83,6 +140,28 @@ SESSION_NOTICE = (
 )
 
 TRUNCATION_NOTICE = "\n[...rule truncated by the rules-by-path size limit...]"
+
+# Prefixed onto a rule's body when it is injected because the rule was EDITED
+# mid-session: the dedup key hashes the body, so a changed rule is injected
+# again on its own, but the earlier wording is still sitting in the transcript
+# as a now-contradictory instruction — pairwise conflicts between injected
+# instructions are a driver of long-context collapse (arXiv:2608.02639), so the
+# fresh copy says outright which one to follow.
+SUPERSEDE_NOTICE = (
+    "This version supersedes any earlier occurrence of this rule in the "
+    "conversation."
+)
+
+# The reason shown for an `enforce: deny` block. The hook does not validate
+# the rule, only the path — the added value is (a) the rule's own text as the
+# pedagogical reason a human or model reads for WHY, and (b) not having to
+# hand-author a `permissions.deny` entry. `{body}` is filled in already
+# defanged (see `neutralize`), so this template itself carries none of the
+# rule's untrusted content directly.
+ENFORCE_DENY_REASON_TEMPLATE = (
+    "rules-by-path: this tool call is blocked by the enforced rule {name!r} "
+    "(global scope). Its own text is the reason:\n\n{body}"
+)
 
 # The whole of the emitted framing: an opening tag, a closing tag, and a line
 # between rules. The tags are not decoration — another injector's document can

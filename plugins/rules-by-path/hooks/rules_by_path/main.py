@@ -7,16 +7,21 @@ import os
 import sys
 import time
 
-from .constants import (FILE_PATH_KEYS, LEGACY_NOTICE, MATCH_BUDGET_SECONDS,
-                        MAX_TOTAL_CHARS, RULES_DIR_RELPATH, SESSION_NOTICE,
+from .constants import (ENFORCE_DENY_REASON_TEMPLATE, FILE_PATH_KEYS,
+                        LEGACY_NOTICE, MATCH_BUDGET_SECONDS, MAX_TOTAL_CHARS,
+                        RULES_DIR_RELPATH, SESSION_NOTICE, WRITE_TOOL_NAMES,
                         warn)
-from .context import build_context
+from .config import (load_config, max_rule_chars,
+                     remember_again_after_default)
+from .context import build_context, neutralize
 from .discovery import find_scopes
-from .frontmatter import globs_of, remember_after_default, remember_after_of
+from .frontmatter import enforce_of, globs_of, remember_again_after_of
 from .globbing import glob_matches
+from .reinject import reinject_budget
 from .rules import has_legacy_map, read_rule_file, scope_index
-from .state import (cleanup_stale_state, close_state, context_size, is_due,
-                    open_state, save_state, state_file_for)
+from .state import (cleanup_stale_state, close_state, context_size,
+                    detect_context_regression, is_due, open_state,
+                    pop_superseded_entries, save_state, state_file_for)
 
 
 def extract_file_path(payload):
@@ -103,6 +108,39 @@ def collect_candidates(abs_path, scopes):
              f"remaining rules of that scope were skipped for this tool call")
     return candidates, legacy
 
+
+def enforce_denial(tool_name, scopes, candidates):
+    """(rule name, rule body) for the first `enforce: deny` rule that should
+    block this tool call, or None when nothing should.
+
+    The hook never validates a rule's content, only its path, so `enforce:` is
+    not a policy engine — it is "the recommended hardening's `permissions.deny`,
+    with the rule's own text as the reason a human or model reads for WHY, and
+    without hand-authoring a permission entry".
+
+    Trust gate, deliberately narrower than what merely MATCHED: only a rule
+    from the GLOBAL scope may ever deny. A project scope's rules arrive with
+    whatever repository is checked out, and honouring `enforce:` there would
+    let a cloned repository deny the user's own tool calls — an escalation the
+    hook must never grant no matter how the frontmatter is worded. `enforce:`
+    on a project-scope rule is simply inert here, silently (no warn on this hot
+    path); `validate` is where it is pointed out, with `enforce --sync` as the
+    way to turn it into an actual native deny for that project."""
+    if tool_name not in WRITE_TOOL_NAMES:
+        return None
+    if not (scopes and scopes[0][0] is None):
+        return None  # no global scope in play this call; nothing to trust
+    trusted_scope = scopes[0][1]
+    for scope_dir, _label, name, _glob, fields in candidates:
+        if scope_dir != trusted_scope or enforce_of(fields) != "deny":
+            continue
+        result = read_rule_file(scope_dir, name)
+        if result is None or not result[1]:
+            continue
+        return name, result[1]
+    return None
+
+
 def main():
     payload = json.load(sys.stdin)
     raw_path = extract_file_path(payload)
@@ -119,19 +157,45 @@ def main():
         return
     candidates, legacy_scopes = collect_candidates(abs_path, scopes)
 
+    denial = enforce_denial(payload.get("tool_name"), scopes, candidates)
+    if denial is not None:
+        name, body = denial
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": ENFORCE_DENY_REASON_TEMPLATE.format(
+                    name=name, body=neutralize(body)),
+            },
+        }))
+        return
+
     tokens = context_size(payload)
-    default_interval = remember_after_default(tokens is not None)
+    # The global scope, when there is one, is the first entry and the only
+    # trusted layer: everything after it is a project scope, whose config
+    # arrives with whatever repository the file belongs to.
+    trusted_count = 1 if scopes and scopes[0][0] is None else 0
+    config = load_config([scope_dir for _base, scope_dir, _label in scopes],
+                         trusted_count)
+    default_interval = remember_again_after_default(config, tokens is not None)
     state_path = state_file_for(payload.get("session_id"))
     state_fd, state = open_state(state_path)
     try:
+        # Catches the compaction/clear the async SessionStart reset lost the
+        # race against: a token count that dropped hard since the last
+        # recorded injection means `seen` still thinks the summarized-away
+        # text is fresh in context. Must run before any dedup decision below.
+        detect_context_regression(state, tokens)
         state["calls"] = state.get("calls", 0) + 1
         call_number = state["calls"]
         seen = state["seen"]
 
         blocks = []
         total_chars = 0
+        body_limit = max_rule_chars(config)
+        budget = reinject_budget(config)
         for scope_dir, label, name, glob, fields in candidates:
-            result = read_rule_file(scope_dir, name)
+            result = read_rule_file(scope_dir, name, body_limit)
             if result is None:
                 continue
             body, was_truncated = result[1], result[2]
@@ -145,13 +209,16 @@ def main():
             last_seen = seen.get(key)
 
             if last_seen is None:
-                text, truncated = body, was_truncated
+                # The first delivery is free: it never counts against the
+                # reinjection budget, only the repeats that follow it do.
+                text, truncated, reinjections = body, was_truncated, 0
             elif is_due(last_seen, call_number, tokens,
-                        remember_after_of(fields) or default_interval):
+                        remember_again_after_of(fields) or default_interval,
+                        budget):
                 # Repeating means sending the rule again, whole: with no header
                 # there is no way to mark a fragment as one. Short rules are
                 # what keeps this cheap.
-                text, truncated = body, was_truncated
+                text, truncated, reinjections = body, was_truncated, last_seen[2] + 1
             else:
                 continue
 
@@ -160,8 +227,18 @@ def main():
                      f"rule '{name}' left for the next tool call")
                 continue
             total_chars += len(text)
-            blocks.append({"name": name, "text": text, "truncated": truncated})
-            seen[key] = [call_number, tokens]
+            # A fresh digest with an older entry still on file under the same
+            # scope+name means the rule was edited: the stale copy is still
+            # sitting in the transcript as a contradictory instruction, so the
+            # delivery says so and the dead entry is dropped rather than
+            # accumulating for the rest of the session. Only checked on a
+            # first-time digest — a plain repeat of an already-delivered
+            # version is not an edit.
+            superseded = last_seen is None and pop_superseded_entries(
+                seen, scope_dir, name, digest)
+            blocks.append({"name": name, "text": text, "truncated": truncated,
+                           "superseded": superseded})
+            seen[key] = [call_number, tokens, reinjections]
 
         # The legacy notice is told once per scope per session. Repeating it on
         # every tool call would be noise the user cannot silence except by

@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "Shipped defaults for rules-by-path. Two more layers may override these,",
+    "in this order: ~/.claude/rules-by-path/config.json (yours, trusted) and",
+    "<project-root>/.claude/rules-by-path/config.json (arrives with a clone, so",
+    "its numbers are clamped). `rules-by-path config --root <root>` prints the",
+    "effective result and says which layer each block came from.",
+    "rule_types is replaced whole by the nearest layer that declares it; the",
+    "other keys are merged key by key.",
+    "Only prohibition-shaped constraints are known to decay under long context",
+    "(arXiv:2604.20911), so only BUSN defaults to active reinforcement; the",
+    "other types default to never and pay reinforcement's cost only when a",
+    "rule opts back in. reinject_budget caps how many times ANY rule may be",
+    "re-injected in one session, regardless of type or distance covered."
+  ],
+
+  "rule_types": [
+    {
+      "prefix": "BUSN",
+      "name": "Business Rules",
+      "purpose": "Domain invariants — violating one makes the software wrong",
+      "remember_again_after": "20k"
+    },
+    {
+      "prefix": "ARCH",
+      "name": "Architecture Decisions",
+      "purpose": "Where new code goes, what it inherits, what to reuse before creating",
+      "remember_again_after": "never"
+    },
+    {
+      "prefix": "CONV",
+      "name": "Conventions & Definitions",
+      "purpose": "House style, naming, formatting — what keeps the codebase consistent",
+      "remember_again_after": "never"
+    },
+    {
+      "prefix": "OTHR",
+      "name": "Memory Pills",
+      "purpose": "Anything else worth remembering about these files",
+      "remember_again_after": "never"
+    }
+  ],
+
+  "legacy_type_prefixes": {
+    "Business": "BUSN",
+    "Architecture": "ARCH",
+    "Convention": "CONV"
+  },
+
+  "remember_again_after": {
+    "tokens": "30k",
+    "calls": "25 calls"
+  },
+
+  "rule_size": {
+    "max_chars": 4000,
+    "warn_chars": 2000
+  },
+
+  "reinject_budget": 3
+}

@@ -31,10 +31,55 @@ repo, and the guidance still isn't tied to what the agent actually touches.
   ```
 
 - Injection happens **once per rule version per session**, then the rule is
-  **sent again, whole**, once the context has moved on by `remember_after`, so
-  it does not fade out of a very long context. Editing a rule re-injects it
-  immediately.
+  **sent again, whole**, once the context has moved on by
+  `remember_again_after`, so it does not fade out of a very long context.
+  Editing a rule re-injects it immediately.
 - Zero context cost for rules that never become relevant.
+
+## vs. native path rules
+
+Claude Code already ships path-scoped guidance of its own, and this plugin
+does not replace it: a `paths:` rule under `.claude/rules/*.md`, or a nested
+`CLAUDE.md`, both load just-in-time the moment Claude *reads* a matching file,
+both reload after a compaction, and both have a user-wide counterpart —
+`~/.claude/rules/` — for guidance that should apply everywhere.
+
+Four gaps in that native behaviour are what this plugin is actually for:
+
+1. **It only triggers on `Read`.** A rule about a file never fires the first
+   time that file is *created* or edited without first being read — exactly
+   the moment a convention is most likely to be broken. This was requested
+   upstream and refused: anthropics/claude-code#38487 was closed not-planned.
+   The hook here watches all five file tools — `Read`, `Edit`, `Write`,
+   `MultiEdit`, `NotebookEdit` — so creation and editing trigger it too.
+2. **Nothing resends a rule once it fades.** A rule injected hundreds of
+   thousands of tokens ago has effectively left a long session's context;
+   nothing native repeats it. `remember_again_after` does.
+3. **No lint or audit surface.** `validate`, `which` and the admin CLI answer
+   "what would fire here", "which rules are dead weight", and let rules be
+   managed at scale from a script — none of which the native mechanism
+   exposes.
+4. **No policy tied to a human reason.** Native `permissions.deny` blocks
+   silently. A **global** rule with `enforce: deny` blocks too, and shows the
+   rule's own text as *why* (see *Enforcing a rule* below) — the hook does not
+   validate the rule, only the path; the added value is a pedagogical reason
+   plus not having to hand-author a permission entry.
+
+On global scope specifically, the honest claim is narrower than "better":
+it is that this plugin's global rules are **consistently trusted** — every
+rule in `~/.claude/rules-by-path/` is treated as trusted input, uniformly.
+The native equivalent has had scope bugs of its own (e.g.
+anthropics/claude-code#17204), so "global scope done right" is a differentiator
+that can narrow, or disappear outright, as the native implementation matures —
+not something to lean on permanently.
+
+**What this buys you, stated plainly: convention adherence and token
+economy** — a rule reaches context exactly when its glob matches, and costs
+nothing when it does not. It is explicitly **not** a claim about task
+correctness: two 2026 ablation studies found that injecting a rule into
+context, on its own, moves correctness on the underlying task by close to
+nothing. Use this to keep an agent inside a team's conventions cheaply, not to
+make it solve harder problems.
 
 ## Install
 
@@ -63,15 +108,24 @@ The `rules-by-path:manage` skill writes one file:
 
 ```
 .claude/rules-by-path/
-└── src--api.md
+└── CONV_api-returns-problemdetails.md
 ```
 
 ```markdown
 ---
 glob: src/api/**
+remember_again_after: 50k
 ---
 Every endpoint validates its input and returns ProblemDetails on error.
 ```
+
+The `CONV_` prefix is the rule's **type** — what violating it would cost. Four
+types ship (`BUSN` business rules, `ARCH` architecture decisions, `CONV`
+conventions, `OTHR` memory pills), each with its own repeat distance, and you
+can declare your own (see *Configuration*). Only `BUSN` repeats by default:
+prohibition-shaped constraints are the ones measured to decay under long
+context, so the other types default to `never` and pay reinforcement's token
+cost only when a rule opts back in.
 
 A rule can declare several globs, and several rules can share one glob — they
 all inject together.
@@ -108,7 +162,7 @@ team shares them.
 ## Repeating a rule
 
 A rule is injected the first time it is relevant, then sent again once the
-context has moved on by 30k tokens. On a long-context session a rule injected
+context has moved on by 30k tokens (the shipped default). On a long-context session a rule injected
 hundreds of thousands of tokens ago has effectively faded.
 
 The distance is measured in **context tokens**, read from the session
@@ -126,16 +180,52 @@ A rule is only ever repeated when its glob matches the file being touched. A
 rule governing a folder nobody opens again is never repeated, however long the
 session runs.
 
-Set the default with `RULES_BY_PATH_REMEMBER_AFTER`, or per rule with
-`remember_after:` in its frontmatter — tokens (`30k`, `1M`), calls
-(`25 calls`), or `never`:
+The default comes from the rule's type, then from `config.json` (see below);
+`RULES_BY_PATH_REMEMBER_AGAIN_AFTER` overrides it for one session, and
+`remember_again_after:` in a rule's own frontmatter overrides everything —
+tokens (`30k`, `1M`), calls (`25 calls`), or `never`:
 
 ```markdown
 ---
 glob: infra/**
-remember_after: 50k
+remember_again_after: 50k
 ---
 ```
+
+## Configuration
+
+The rule taxonomy, the repeat defaults and the size limits live in a
+`config.json` read from three layers, each overriding the one before it:
+
+| Layer | Where | Trusted |
+|---|---|---|
+| Plugin | `<plugin>/config.json` — the shipped default | yes |
+| User | `~/.claude/rules-by-path/config.json` | yes |
+| Project | `<project>/.claude/rules-by-path/config.json` | **no** |
+
+```json
+{
+  "rule_types": [
+    {"prefix": "BUSN", "name": "Business Rules",
+     "purpose": "Domain invariants — violating one makes the software wrong",
+     "remember_again_after": "20k"}
+  ],
+  "remember_again_after": {"tokens": "30k", "calls": "25 calls"},
+  "rule_size": {"max_chars": 4000, "warn_chars": 2000}
+}
+```
+
+`rules-by-path config --root <root>` prints the effective result and names the
+layer each value came from. `rule_types` is replaced whole by the nearest layer
+that declares it — merging two taxonomies by prefix would produce a hybrid
+nobody wrote; the other keys merge key by key.
+
+A project layer arrives with whatever repository is checked out, so it is
+treated like any other repository content: its intervals are clamped to a floor
+(a clone cannot ask for a repeat on nearly every tool call), its type texts are
+bounded to one printable line, its prefixes must be ASCII letters and digits,
+and it may **shorten** `max_chars` but never lengthen it. A layer that cannot be
+parsed is skipped with a warning; nothing about a config can stop injection.
 
 ## Glob semantics
 
@@ -157,9 +247,13 @@ anywhere). To target a `docs/` folder wherever it appears, use `**/docs/**`.
 
 ## Design guarantees
 
-- **Never blocks work**: any internal hook failure goes to stderr and the tool
-  call proceeds untouched. The only deliberate block is the nested-CLAUDE.md
-  guard.
+- **Never blocks work by accident**: any internal hook failure goes to stderr
+  and the tool call proceeds untouched. The hook denies a tool call only
+  through one deliberate, narrow path — a **global** rule with `enforce: deny`
+  matching a write (see *Enforcing a rule* below) — never as a side effect of a
+  failure. The recommended hardening's own `permissions.deny` entries (see
+  *Security model*) are a second, independent way to deny, which the hook has
+  no part in enforcing.
 - **Bounded**: a rule is truncated at 4k chars (the CLI warns above 2k), one
   injection is capped at 24k, a scope is capped at 256 rules and a glob at 256
   chars, and at most 8 scopes are consulted per tool call.
@@ -265,6 +359,46 @@ next session. The notice is emitted only when a scope actually exists.
 It raises the bar; it is not a sandbox — it constrains Claude's file tools,
 not arbitrary subprocesses. Optional, but it is how the system is meant to run.
 
+### Enforcing a rule (`enforce: deny`)
+
+Native `permissions.deny` blocks a tool call with no explanation attached. A
+rule can ask for the same block, plus one thing native deny does not offer: its
+own body as the reason a human or model actually reads.
+
+```markdown
+---
+glob: infra/prod/**
+enforce: deny
+---
+Production infrastructure is changed through the deploy pipeline only, never
+by hand. Open a PR against `infra/` instead.
+```
+
+The hook still does not read a rule for CORRECTNESS — it only ever matches a
+path — so `enforce: deny` is exactly the native deny, with the rule's
+(defanged) text attached as `permissionDecisionReason`. It fires only for
+`Write`, `Edit`, `MultiEdit` and `NotebookEdit`; `Read` is never denied.
+
+**Trust gate: honoured from the GLOBAL scope only.** A project's
+`.claude/rules-by-path/` arrives with whatever repository is checked out —
+exactly as untrusted as its `CLAUDE.md` — so a project rule that declares
+`enforce: deny` is inert to the hook, silently, no matter how it is worded.
+There is no config, environment variable or project layer that widens this: it
+is keyed to which scope actually matched, not to anything a repository could
+set. `validate` still points it out, with the way around it:
+
+```bash
+"<plugin>/bin/rules-by-path" enforce --root <project-root> --list   # what would fire, and what it maps to
+"<plugin>/bin/rules-by-path" enforce --root <project-root> --sync   # write the native deny entries for real
+```
+
+`--sync` writes one `Edit(<glob>)` entry per glob into that project's own
+`.claude/settings.json` — `Edit(...)` alone, because it already covers every
+file-editing tool (see *Recommended hardening* above); idempotent, and it
+creates a minimal `settings.json` if the project has none yet. A global rule
+needs no such sync: the hook already enforces it directly, so `--sync --global`
+is refused.
+
 ## Uninstalling
 
 `/plugin uninstall rules-by-path@pdmartins` removes the hook and the
@@ -288,8 +422,10 @@ Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directl
 - **Rule not injecting?** Each rule version injects once per session. The
   state lives in `$CLAUDE_PLUGIN_DATA/state/` for a plugin install (falling
   back to `~/.claude/cache/rules-by-path/`); delete `<state-dir>/<session_id>.json`
-  to force re-injection. Check the rule is inside the repository — the search
-  stops at the repo root — and that `validate` reports it.
+  to force re-injection. Check that a scope containing the rule is actually on
+  the path from the touched file up to the filesystem root — the walk does not
+  stop at a repository boundary, so this is rarely the cause — and that
+  `validate` reports it.
 - **Upgrading from the `rules-map.yml` format?** Run
   `"<plugin>/bin/rules-by-path" migrate --root <root>` (and `--global`). Until
   you do, that scope injects nothing and the hook says so in context.

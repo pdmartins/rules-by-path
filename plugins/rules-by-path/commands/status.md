@@ -55,34 +55,51 @@ firing?" definitively. Single-quote the path:
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --global --path '<target>'
 ```
 
-## 5. How often rules are repeated, and in what unit
+## 5. The configuration in force
 
 ```bash
-echo "RULES_BY_PATH_REMEMBER_AFTER=${RULES_BY_PATH_REMEMBER_AFTER:-30k (default)}"
+"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" config --root "$ROOT"
+```
+
+It prints the rule types, the repeat defaults and the size limits, and names the
+layer each came from — the plugin's own `config.json`, the user's, or the
+project's. An environment variable still beats every layer:
+
+```bash
+echo "RULES_BY_PATH_REMEMBER_AGAIN_AFTER=${RULES_BY_PATH_REMEMBER_AGAIN_AFTER:-unset (config applies)}"
 ```
 
 The unit actually in use depends on whether the hook can read the session
 transcript: with it, the distance is measured in context tokens; without it, in
 file-tool calls. The most recent state file records which one was used —
-`"seen"` entries hold `[call number, context tokens]`, and a `null` in the
-second slot means the token count was unavailable:
+`"seen"` entries hold `[call number, context tokens, reinjections already
+sent]`, a `null` in the second slot means the token count was unavailable, and
+the third slot counts against the plugin's `reinject_budget` (default 3,
+first delivery not counted) — once it reaches the budget, the rule stops
+repeating for the rest of the session even though it still matches:
+
+State lives in `$CLAUDE_PLUGIN_DATA/state/` for a plugin install, falling back
+to `~/.claude/cache/rules-by-path/` (no `state/` subfolder there) when that
+variable is unset:
 
 ```bash
-ls -t "${CLAUDE_PLUGIN_DATA:-$HOME/.claude/cache}"/rules-by-path/state/*.json \
+ls -t ${CLAUDE_PLUGIN_DATA:+"$CLAUDE_PLUGIN_DATA/state"/*.json} \
+      "$HOME/.claude/cache/rules-by-path"/*.json \
   2>/dev/null | head -1 | xargs -r head -c 400
 ```
 
 ## Report
 
 In this order: launcher ok or broken; rule count per scope; anything `validate`
-flagged; which rules cover the queried path (or that none do); the repeat
-distance and the unit it is being measured in.
+flagged; which rules cover the queried path (or that none do); the effective
+config and which layer it came from; the repeat distance and the unit it is
+being measured in.
 
 Two things worth saying when they apply, because they look like bugs and are
 not:
 
 - a rule injects **once per session per version**, so a correctly configured
   rule that was already delivered will not appear again until it changes or the
-  context moves on by its `remember_after` distance;
+  context moves on by its `remember_again_after` distance;
 - a scope still holding `rules-map.yml` injects nothing at all until
   `/rules-by-path:setup` migrates it.

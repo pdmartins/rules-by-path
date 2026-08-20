@@ -120,23 +120,23 @@ class FrontmatterTest(unittest.TestCase):
         fields, _ = HOOK.parse_frontmatter("---\nglob: src/**\nno end marker\n")
         self.assertEqual(HOOK.globs_of(fields), [])
 
-    def test_remember_after_values(self):
-        self.assertEqual(HOOK.remember_after_of({"remember_after": "30k"}),
+    def test_remember_again_after_values(self):
+        self.assertEqual(HOOK.remember_again_after_of({"remember_again_after": "30k"}),
                          (30_000, "tokens"))
-        self.assertEqual(HOOK.remember_after_of({"remember_after": "30000"}),
+        self.assertEqual(HOOK.remember_again_after_of({"remember_again_after": "30000"}),
                          (30_000, "tokens"))
-        self.assertEqual(HOOK.remember_after_of({"remember_after": "25 calls"}),
+        self.assertEqual(HOOK.remember_again_after_of({"remember_again_after": "25 calls"}),
                          (25, "calls"))
-        self.assertEqual(HOOK.remember_after_of({"remember_after": "never"}), (0, None))
-        self.assertIsNone(HOOK.remember_after_of({}))
-        self.assertIsNone(HOOK.remember_after_of({"remember_after": "nonsense"}))
+        self.assertEqual(HOOK.remember_again_after_of({"remember_again_after": "never"}), (0, None))
+        self.assertIsNone(HOOK.remember_again_after_of({}))
+        self.assertIsNone(HOOK.remember_again_after_of({"remember_again_after": "nonsense"}))
 
     def test_a_bare_number_too_small_to_be_tokens_is_refused(self):
-        """`remember_after: 25` is far more likely to be a leftover call count
+        """`remember_again_after: 25` is far more likely to be a leftover call count
         than a 25-token budget, and honouring it would repeat the rule on every
         single tool call."""
-        self.assertIsNone(HOOK.remember_after_of({"remember_after": "25"}))
-        self.assertEqual(HOOK.remember_after_of({"remember_after": "25 calls"}),
+        self.assertIsNone(HOOK.remember_again_after_of({"remember_again_after": "25"}))
+        self.assertEqual(HOOK.remember_again_after_of({"remember_again_after": "25 calls"}),
                          (25, "calls"))
 
     def test_an_explicit_token_unit_below_the_floor_is_not_called_a_typo(self):
@@ -145,7 +145,7 @@ class FrontmatterTest(unittest.TestCase):
         message must not send them hunting for a mistake they did not make."""
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
-            self.assertIsNone(HOOK.remember_after_of({"remember_after": "500 tokens"}))
+            self.assertIsNone(HOOK.remember_again_after_of({"remember_again_after": "500 tokens"}))
         self.assertIn("below the", stderr.getvalue())
         self.assertNotIn("old format", stderr.getvalue())
 
@@ -155,7 +155,7 @@ class FrontmatterTest(unittest.TestCase):
         for value in ("inf", "-inf", "1e400"):
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
-                self.assertIsNone(HOOK.remember_after_of({"remember_after": value}),
+                self.assertIsNone(HOOK.remember_again_after_of({"remember_again_after": value}),
                                   value)
             self.assertIn("not understood", stderr.getvalue())
 
@@ -175,10 +175,22 @@ class FrontmatterTest(unittest.TestCase):
         self.assertEqual(HOOK.parse_size("200000"), 200_000)
 
     def test_the_default_follows_what_the_session_can_measure(self):
-        self.assertEqual(HOOK.remember_after_default(True),
-                         (HOOK.DEFAULT_REMEMBER_TOKENS, "tokens"))
-        self.assertEqual(HOOK.remember_after_default(False),
-                         (HOOK.DEFAULT_REMEMBER_CALLS, "calls"))
+        config = HOOK.load_config()  # the plugin's own config.json, no overrides
+        self.assertEqual(HOOK.remember_again_after_default(config, True),
+                         (HOOK.DEFAULT_REMEMBER_AGAIN_TOKENS, "tokens"))
+        self.assertEqual(HOOK.remember_again_after_default(config, False),
+                         (HOOK.DEFAULT_REMEMBER_AGAIN_CALLS, "calls"))
+
+    def test_the_key_renamed_in_0_4_0_is_still_honoured(self):
+        """`remember_after:` was the name until 0.4.0. Dropping the setting
+        because a hand-written rule uses the old spelling would change behaviour
+        for someone who changed nothing."""
+        self.assertEqual(HOOK.remember_again_after_of({"remember_after": "40k"}),
+                         (40_000, "tokens"))
+        self.assertEqual(
+            HOOK.remember_again_after_of({"remember_after": "40k",
+                                          "remember_again_after": "10k"}),
+            (10_000, "tokens"), "the current key wins when both are present")
 
 
 class HookEndToEndTest(unittest.TestCase):
@@ -219,14 +231,14 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertIsNotNone(self.inject()[1], "after reset the rule injects again")
 
     def test_one_rule_with_a_broken_setting_does_not_silence_the_others(self):
-        """A `remember_after` the parser cannot read is a defect in ONE rule.
+        """A `remember_again_after` the parser cannot read is a defect in ONE rule.
         It used to raise out of the per-rule loop, which happens before anything
         is written to stdout — so the whole injection was lost, including rules
         from other scopes, on every tool call that reached the bad file."""
         util.write_rule(self.proj, "a-broken.md", "src/api/**", "BROKEN RULE",
-                        extra_frontmatter=["remember_after: inf"])
+                        extra_frontmatter=["remember_again_after: inf"])
         util.write_rule(self.proj, "b-good.md", "src/api/**", "GOOD RULE",
-                        extra_frontmatter=["remember_after: 1 calls"])
+                        extra_frontmatter=["remember_again_after: 1 calls"])
         self.assertIsNotNone(self.inject()[1], "first touch injects both")
         proc, text = self.inject()  # second touch: the good rule is due again
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -365,7 +377,7 @@ class ReinforcementTest(unittest.TestCase):
     def test_the_rule_is_sent_again_whole_after_the_configured_distance(self):
         body = "Always validate DTOs.\n\nMore detail, sent again with the rest."
         util.write_rule(self.proj, "src.md", "src/**", body)
-        env = {"RULES_BY_PATH_REMEMBER_AFTER": "3 calls"}
+        env = {"RULES_BY_PATH_REMEMBER_AGAIN_AFTER": "3 calls"}
         first = self.touch(env=env)
         self.assertIn("Always validate DTOs.", first)
         self.assertIsNone(self.touch(env=env), "call 2: nothing")
@@ -378,6 +390,8 @@ class ReinforcementTest(unittest.TestCase):
 
     def test_repetition_can_be_disabled(self):
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.")
+        # Deliberately the pre-0.4.0 spelling: an installation that exported it
+        # must keep the behaviour it configured.
         env = {"RULES_BY_PATH_REMEMBER_AFTER": "never"}
         self.assertIsNotNone(self.touch(env=env))
         for _ in range(6):
@@ -385,8 +399,8 @@ class ReinforcementTest(unittest.TestCase):
 
     def test_per_rule_override_wins(self):
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
-                        extra_frontmatter=["remember_after: never"])
-        env = {"RULES_BY_PATH_REMEMBER_AFTER": "2 calls"}
+                        extra_frontmatter=["remember_again_after: never"])
+        env = {"RULES_BY_PATH_REMEMBER_AGAIN_AFTER": "2 calls"}
         self.assertIsNotNone(self.touch(env=env))
         for _ in range(5):
             self.assertIsNone(self.touch(env=env))
@@ -396,9 +410,9 @@ class ReinforcementTest(unittest.TestCase):
         distance keeps the rule alive; converting tokens to calls would be a
         made-up rate, and staying silent would lose the rule for the session."""
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
-                        extra_frontmatter=["remember_after: 30k"])
+                        extra_frontmatter=["remember_again_after: 30k"])
         self.assertIsNotNone(self.touch())
-        for _ in range(HOOK.DEFAULT_REMEMBER_CALLS - 1):
+        for _ in range(HOOK.DEFAULT_REMEMBER_AGAIN_CALLS - 1):
             self.assertIsNone(self.touch())
         self.assertIsNotNone(self.touch(), "the default call distance applies")
 
@@ -431,7 +445,7 @@ class ReinforcementTest(unittest.TestCase):
 
     def test_the_rule_repeats_once_the_context_has_grown_by_the_token_distance(self):
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
-                        extra_frontmatter=["remember_after: 30k"])
+                        extra_frontmatter=["remember_again_after: 30k"])
         transcript = os.path.join(self.tmp.name, "t.jsonl")
 
         def touch_with(total):
@@ -447,9 +461,9 @@ class ReinforcementTest(unittest.TestCase):
     def test_calls_and_tokens_can_be_mixed_in_one_session(self):
         """Each rule chooses its own unit, so the state records both measures."""
         util.write_rule(self.proj, "by-tokens.md", "src/**", "TOKEN RULE",
-                        extra_frontmatter=["remember_after: 30k"])
+                        extra_frontmatter=["remember_again_after: 30k"])
         util.write_rule(self.proj, "by-calls.md", "src/**", "CALL RULE",
-                        extra_frontmatter=["remember_after: 2 calls"])
+                        extra_frontmatter=["remember_again_after: 2 calls"])
         transcript = os.path.join(self.tmp.name, "mixed.jsonl")
 
         def touch_with(total):
@@ -470,7 +484,7 @@ class ReinforcementTest(unittest.TestCase):
         """Distance covered is necessary, not sufficient: the hook only ever
         asks the question when the rule's glob matched the file at hand."""
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
-                        extra_frontmatter=["remember_after: 1 calls"])
+                        extra_frontmatter=["remember_again_after: 1 calls"])
         self.assertIsNotNone(self.touch())
         for _ in range(5):
             util.run_hook(util.read_payload(
@@ -480,7 +494,7 @@ class ReinforcementTest(unittest.TestCase):
 
     def test_edited_rule_is_treated_as_a_new_rule(self):
         util.write_rule(self.proj, "src.md", "src/**", "VERSION ONE")
-        env = {"RULES_BY_PATH_REMEMBER_AFTER": "50 calls"}
+        env = {"RULES_BY_PATH_REMEMBER_AGAIN_AFTER": "50 calls"}
         self.assertIn("VERSION ONE", self.touch(env=env))
         self.assertIsNone(self.touch(env=env))
         util.write_rule(self.proj, "src.md", "src/**", "VERSION TWO body line")

@@ -12,8 +12,9 @@ import stat
 import tempfile
 import time
 
-from .constants import (DEFAULT_REMEMBER_CALLS, MAX_SESSION_ID_CHARS,
-                        STATE_MAX_AGE_SECONDS, TRANSCRIPT_TAIL_BYTES, warn)
+from .constants import (DEFAULT_REMEMBER_AGAIN_CALLS, MAX_SESSION_ID_CHARS,
+                        STATE_MAX_AGE_SECONDS, TOKEN_REGRESSION_SLACK,
+                        TRANSCRIPT_TAIL_BYTES, warn)
 from .discovery import is_safely_owned
 
 
@@ -87,13 +88,16 @@ def state_file_for(session_id):
 
 
 def coerce_seen_entry(value):
-    """[call number, context tokens or None] from whatever is on disk, or None
-    when the entry is unusable. Accepts the bare integer written by earlier
-    versions, which recorded only the call number."""
+    """[call number, context tokens or None, reinjections already sent] from
+    whatever is on disk, or None when the entry is unusable. Accepts the bare
+    integer written by earlier versions (call number only) and the
+    two-element list that predates the reinjection budget — both are missing
+    the third slot, which is filled with 0: an entry written before the
+    budget existed has spent none of it."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return [value, None]
+        return [value, None, 0]
     if isinstance(value, list) and value:
         try:
             calls = int(value[0])
@@ -105,7 +109,11 @@ def coerce_seen_entry(value):
                 tokens = int(tokens)
             except (TypeError, ValueError):
                 tokens = None
-        return [calls, tokens]
+        try:
+            reinjections = int(value[2]) if len(value) > 2 else 0
+        except (TypeError, ValueError):
+            reinjections = 0
+        return [calls, tokens, reinjections]
     return None
 
 
@@ -171,7 +179,8 @@ def open_state(state_path):
     """Open the session state under an exclusive lock: (fd, state).
 
     state = {"calls": int,
-             "seen": {dedup_key: [call number, context tokens or None]}}.
+             "seen": {dedup_key: [call number, context tokens or None,
+                                  reinjections already sent]}}.
 
     Both measures are recorded because rules choose their own unit: one rule may
     ask to be repeated every 30k tokens and another every 25 calls, in the same
@@ -276,15 +285,87 @@ def cleanup_stale_state():
     except Exception as exc:
         warn(f"state cleanup failed: {exc}")
 
-def is_due(last_seen, call_number, tokens, interval):
+def detect_context_regression(state, current_tokens):
+    """Fallback for when SessionStart(compact|clear)'s async reset loses the
+    race against the very next PreToolUse: the reset's `--reset-session`
+    delete has not landed yet, so `seen` still carries the pre-compaction
+    high-water mark, and a rule whose text just got summarized out of context
+    reads as "already delivered" and stays silent exactly when it needs to be
+    repeated (this is the failure the reset exists to prevent; here it is
+    caught late instead of not at all).
+
+    Clears `seen` in place — `calls` is untouched — and returns True when
+    `current_tokens` has fallen more than TOKEN_REGRESSION_SLACK below the
+    highest token count recorded on any seen entry: a drop that size is
+    compaction or /clear, not the ordinary jitter of which turn the
+    transcript's last usage record happens to describe. `current_tokens is
+    None` (no readable transcript) or no seen entry with a recorded token
+    count both mean there is nothing to compare against, so nothing is
+    cleared — a regression is never guessed at, only measured.
+    """
+    if current_tokens is None:
+        return False
+    seen = state.get("seen")
+    if not isinstance(seen, dict):
+        return False
+    max_recorded = None
+    for entry_value in seen.values():
+        entry = coerce_seen_entry(entry_value)
+        if entry is None:
+            continue
+        tokens = entry[1]
+        if tokens is not None and (max_recorded is None or tokens > max_recorded):
+            max_recorded = tokens
+    if max_recorded is None:
+        return False
+    if current_tokens + TOKEN_REGRESSION_SLACK < max_recorded:
+        warn(f"context tokens dropped from {max_recorded} to {current_tokens}; "
+             "compaction/clear likely won the race against the async reset, "
+             "clearing seen rules so they re-inject on this call")
+        seen.clear()
+        return True
+    return False
+
+
+def pop_superseded_entries(seen, scope_dir, name, digest):
+    """Remove and report whether `seen` held an entry for this same rule — same
+    scope directory and name — under a DIFFERENT content hash. A hit means the
+    rule was edited since that entry was recorded: the dedup key hashes the
+    body, so the new text is injected on its own regardless, but the earlier
+    wording stays in the transcript as a stale, contradictory instruction
+    unless something clears it out. This is that cleanup.
+
+    Only called once the caller has committed to injecting this delivery, so
+    an edit that gets deferred (the char budget was full this call, say) is
+    left alone — the caller detects the same edit again on the next attempt
+    instead of losing the record of it. Left in place, a stale entry no longer
+    drives any scheduling decision of its own (nothing keys off a digest that
+    stopped matching), but it also never goes away: a rule edited several
+    times in one session would otherwise leave one dead entry behind per edit
+    for the rest of the session.
+    """
+    prefix = f"{os.path.realpath(scope_dir)}::{name}::"
+    current_key = prefix + digest
+    stale = [key for key in seen if key.startswith(prefix) and key != current_key]
+    for key in stale:
+        del seen[key]
+    return bool(stale)
+
+
+def is_due(last_seen, call_number, tokens, interval, budget):
     """Whether a rule already delivered this session should be sent again.
 
     The question is only ever asked when the rule's glob matched the file being
     touched, so covering the distance is necessary but not sufficient: a rule
     governing a folder nobody opens again is never repeated, however long the
-    session runs.
+    session runs. Nor is it sufficient once `budget` reinjections have already
+    been spent on this rule this session — only prohibition-style constraints
+    are known to decay under long context (arXiv:2604.20911), and every
+    reinjection adds one more instruction competing for the model's attention
+    regardless of type (arXiv:2608.02639), so repetition is capped rather than
+    left to run for the rest of a very long session.
 
-    `interval` is (value, unit) as parsed from `remember_after`; a value of 0
+    `interval` is (value, unit) as parsed from `remember_again_after`; a value of 0
     means never. A token distance in a session that cannot count tokens falls
     back to the default call count, which prefers a coarser schedule to silence.
     Converting between tokens and calls is never attempted — there is no
@@ -293,9 +374,11 @@ def is_due(last_seen, call_number, tokens, interval):
     value, unit = interval
     if not value:
         return False
-    last_calls, last_tokens = last_seen
+    last_calls, last_tokens, reinjections = last_seen
+    if reinjections >= budget:
+        return False
     if unit == "calls":
         return call_number - last_calls >= value
     if tokens is None or last_tokens is None:
-        return call_number - last_calls >= DEFAULT_REMEMBER_CALLS
+        return call_number - last_calls >= DEFAULT_REMEMBER_AGAIN_CALLS
     return tokens - last_tokens >= value

@@ -3,11 +3,8 @@
 Deliberately the only parser in the plugin — the admin CLI imports this one
 rather than carrying a second implementation."""
 
-import os
-
-from .constants import (DEFAULT_REMEMBER_CALLS, DEFAULT_REMEMBER_TOKENS,
-                        MAX_GLOB_CHARS, MAX_GLOBS_PER_RULE,
-                        MIN_REMEMBER_TOKENS, REMEMBER_ENV_VAR, warn)
+from .constants import (MAX_GLOB_CHARS, MAX_GLOBS_PER_RULE,
+                        MIN_REMEMBER_AGAIN_TOKENS, warn)
 
 
 def unquote(value):
@@ -114,21 +111,21 @@ def parse_size(text):
     return int(float(text.strip())) * multiplier
 
 
-def parse_remember_after(raw, source):
-    """(value, unit) for a `remember_after` setting, or None when unset.
+def parse_remember_again_after(raw, source):
+    """(value, unit) for a `remember_again_after` setting, or None when unset.
 
     unit is "tokens" or "calls"; a value of 0 means never repeat.
 
-        remember_after: 30k        -> (30000, "tokens")
-        remember_after: 30000      -> (30000, "tokens")
-        remember_after: 25 calls   -> (25, "calls")
-        remember_after: never      -> (0, None)
+        remember_again_after: 30k        -> (30000, "tokens")
+        remember_again_after: 30000      -> (30000, "tokens")
+        remember_again_after: 25 calls   -> (25, "calls")
+        remember_again_after: never      -> (0, None)
 
     Tokens are the default unit because they measure the thing that actually
-    causes drift. A bare number below MIN_REMEMBER_TOKENS is refused rather than
-    honoured: it is far more likely to be a leftover `remember_after: 25` from
-    when the interval was counted in tool calls than a genuine 25-token budget,
-    and silently treating it as tokens would repeat the rule on every call.
+    causes drift. A bare number below MIN_REMEMBER_AGAIN_TOKENS is refused rather
+    than honoured: it is far more likely to be a leftover `remember_again_after:
+    25` from when the interval was counted in tool calls than a genuine 25-token
+    budget, and silently treating it as tokens would repeat it on every call.
     """
     if raw in (None, [], ""):
         return None
@@ -156,40 +153,59 @@ def parse_remember_after(raw, source):
         # OverflowError is `inf`/`1e400`: int() refuses it, and it is not a
         # ValueError. Letting it escape aborted the whole injection for that
         # tool call — every rule, not just the one carrying the bad value.
-        warn(f"{source}: remember_after not understood: {str(raw)[:32]!r}")
+        warn(f"{source}: remember_again_after not understood: {str(raw)[:32]!r}")
         return None
     if value <= 0:
         return (0, None)
-    if unit == "tokens" and value < MIN_REMEMBER_TOKENS:
+    if unit == "tokens" and value < MIN_REMEMBER_AGAIN_TOKENS:
         # Two different mistakes, and guessing wrong at the author's expense is
         # what the flag avoids: a bare number that small is almost certainly a
         # call count from the old format, but `500 tokens` says what it means —
         # it is simply below the floor, and accusing it of being a typo sends
         # the reader looking for a mistake they did not make.
         if unit_stated:
-            warn(f"{source}: remember_after of {value} tokens is below the "
-                 f"{MIN_REMEMBER_TOKENS}-token minimum (it would repeat the "
+            warn(f"{source}: remember_again_after of {value} tokens is below the "
+                 f"{MIN_REMEMBER_AGAIN_TOKENS}-token minimum (it would repeat the "
                  f"rule on nearly every call); using the default instead")
         else:
-            warn(f"{source}: remember_after of {value} tokens looks like a call "
+            warn(f"{source}: remember_again_after of {value} tokens looks like a call "
                  f"count from the old format; using the default instead "
                  f"(write '{value} calls' if that is what you meant)")
         return None
     return (value, unit)
 
 
-def remember_after_of(fields):
-    """Per-rule override, or None to use the session default."""
-    return parse_remember_after(fields.get("remember_after"), "rule")
+def enforce_of(fields):
+    """The rule's `enforce:` setting, or None when it declares none, or one
+    this function does not recognise.
+
+    Only `deny` is ever recognised, and any other value returns None exactly
+    like an absent key — this function never warns, unlike the rest of this
+    module. It runs on the hook's hot path (shared with the CLI, per this
+    module's own docstring), and a bogus `enforce:` value is `validate`'s to
+    report, where a human is actually listening, not something the hook should
+    complain about on every single tool call.
+
+    This says only what the frontmatter DECLARES. Whether the declaring scope
+    is trusted enough to act on it — the hook only ever honours `deny` from the
+    global scope — is a decision the caller makes, not this function."""
+    raw = fields.get("enforce")
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if not isinstance(raw, str):
+        return None
+    return "deny" if raw.strip().lower() == "deny" else None
 
 
-def remember_after_default(measured_in_tokens):
-    """The interval used by rules that declare none, in the unit the session can
-    actually measure."""
-    override = parse_remember_after(os.environ.get(REMEMBER_ENV_VAR),
-                                    REMEMBER_ENV_VAR)
-    if override is not None:
-        return override
-    if measured_in_tokens:
-        return (DEFAULT_REMEMBER_TOKENS, "tokens")
-    return (DEFAULT_REMEMBER_CALLS, "calls")
+def remember_again_after_of(fields):
+    """Per-rule override, or None to use the session default.
+
+    `remember_after:` is the name this key carried until 0.4.0 and is still
+    honoured, silently: dropping a setting because a hand-written rule uses the
+    old spelling would change behaviour for someone who changed nothing. The
+    admin's `validate` is where the rename is pointed out, and `migrate`
+    rewrites it."""
+    raw = fields.get("remember_again_after")
+    if raw in (None, [], ""):
+        raw = fields.get("remember_after")
+    return parse_remember_again_after(raw, "rule")
