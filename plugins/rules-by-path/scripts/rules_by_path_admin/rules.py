@@ -7,10 +7,12 @@ the only moment in the whole system when a human is present to choose it."""
 import os
 import sys
 
-from .common import (ENFORCE_KEY, HOOK, INTERVAL_KEY, LEGACY_INTERVAL_KEY,
-                     OWN_KEYS, atomic_write, check_glob, check_line_value,
-                     existing_is_not_a_rule, fail, other_markdown_in,
-                     rule_path, rules_in, scope_for, warn, warn_if_long)
+from .common import (HOOK, INTERVAL_KEY, LEGACY_INTERVAL_KEY,
+                     MAX_ECHOED_NAME_CHARS, RENDERED_KEYS, atomic_write,
+                     check_glob, check_line_value, existing_is_not_a_rule,
+                     existing_rule_path, fail, other_markdown_in,
+                     preserved_fields, rule_path, rules_in, scope_for, warn,
+                     warn_if_long)
 from .config import (TYPE_SEPARATOR, check_remember_again_after, config_for,
                      resolve_type)
 from .validate import validate_scope
@@ -51,18 +53,15 @@ def render_rule(globs, body, remember_again_after=None, extra=None):
         lines.append(f"{INTERVAL_KEY}: "
                      f"{check_line_value(INTERVAL_KEY, remember_again_after)}")
     for key, value in (extra or {}).items():
-        # The keys this function writes itself, plus the legacy spelling of the
-        # interval — carrying that one through would write the setting twice,
-        # under two names, and the rule would keep the old one alive forever.
-        if key in ("glob", "globs", INTERVAL_KEY, LEGACY_INTERVAL_KEY) \
-                or isinstance(value, list):
+        if key in RENDERED_KEYS or isinstance(value, list):
             continue
         lines.append(f"{key}: {check_line_value(key, value)}")
     lines.append("---")
     lines.append("")
     frontmatter = "\n".join(lines)
-    if len(frontmatter.encode("utf-8")) > HOOK.MAX_FRONTMATTER_BYTES:
-        fail(f"frontmatter is {len(frontmatter.encode('utf-8'))} bytes, over the "
+    size = len(frontmatter.encode("utf-8"))
+    if size > HOOK.MAX_FRONTMATTER_BYTES:
+        fail(f"frontmatter is {size} bytes, over the "
              f"{HOOK.MAX_FRONTMATTER_BYTES}-byte window the hook reads to find the "
              f"closing '---'; use fewer or shorter globs, or a shorter description")
     return frontmatter + body.strip() + "\n"
@@ -105,9 +104,7 @@ def cmd_list(args):
 
 def cmd_show(args):
     scope_dir, _ = scope_for(args)
-    path = rule_path(scope_dir, args.rule)
-    if os.path.islink(path) or not os.path.isfile(path):
-        fail(f"no such rule in this scope: {args.rule}")
+    path = existing_rule_path(scope_dir, args.rule)
     # Read the file whole: `show` feeds the show -> edit -> update round trip,
     # so truncating here would silently destroy the tail of a long rule.
     # `errors="replace"` matches every other reader in the plugin: under the
@@ -154,12 +151,11 @@ def cmd_which(args):
                 if any(HOOK.glob_matches(glob, r, a) for r, a in targets):
                     matches.append(name)
                     break
+    if not matches:
+        print(f"no rule covers '{shown}'")
+        return
     for name in matches:
         print(f"match: rule {name}")
-    if matches:
-        return
-
-    print(f"no rule covers '{shown}'")
 
 
 def cmd_add(args):
@@ -176,7 +172,7 @@ def cmd_add(args):
     if not HOOK.is_valid_rule_name(name):
         source = "invalid rule name" if args.rule else \
             f"the name derived from {globs[0]!r} is not usable"
-        fail(f"{source}: {name[:60]!r} — pass a plain one, e.g. "
+        fail(f"{source}: {name[:MAX_ECHOED_NAME_CHARS]!r} — pass a plain one, e.g. "
              f"--rule {prefix}{TYPE_SEPARATOR}handlers-inherit-base.md")
     path = rule_path(scope_dir, name)
     if existing_is_not_a_rule(path):
@@ -192,16 +188,16 @@ def cmd_add(args):
     # the rule rather than resolved at injection time, so the file states its
     # own schedule and the hook never has to know what a type is.
     from_type = HOOK.remember_again_after_for_type(config, prefix)
-    interval = args.remember_again_after or submitted_interval(submitted) or from_type
+    from_body = submitted_interval(submitted)
+    interval = args.remember_again_after or from_body or from_type
     check_remember_again_after(interval)
     atomic_write(path, render_rule(globs, body, interval,
-                                   {k: v for k, v in submitted.items()
-                                    if k not in OWN_KEYS
-                                    or k in ("description", ENFORCE_KEY)}))
+                                   preserved_fields(submitted)))
     print(f"ok: {name}  <-  {', '.join(globs)}")
     if interval:
-        origin = f" (default for {prefix})" if interval == from_type and \
-            not args.remember_again_after and not submitted_interval(submitted) else ""
+        from_type_only = (interval == from_type and not args.remember_again_after
+                          and not from_body)
+        origin = f" (default for {prefix})" if from_type_only else ""
         print(f"    {INTERVAL_KEY}: {interval}{origin}")
     warn_if_long(name, body, config)
     validate_scope(scope_dir, anchor, quiet=True, config=config,
@@ -213,9 +209,7 @@ def cmd_update(args):
     body, submitted = split_submitted(sys.stdin.read())
     if not body:
         fail("empty rule content — send the markdown via stdin")
-    path = rule_path(scope_dir, args.rule)
-    if os.path.islink(path) or not os.path.isfile(path):
-        fail(f"no such rule in this scope: {args.rule}")
+    path = existing_rule_path(scope_dir, args.rule)
     result = HOOK.read_rule_file(scope_dir, args.rule)
     if result is None:
         fail(f"cannot read {args.rule}")
@@ -235,14 +229,8 @@ def cmd_update(args):
                 or submitted_interval(fields) or None)
     check_remember_again_after(interval)
     merged = {**fields, **submitted}
-    extra = {k: v for k, v in merged.items() if k not in OWN_KEYS}
-    # `description` and `enforce` are in OWN_KEYS (so `validate` recognises
-    # them and neither reports as an unknown frontmatter key), but must still
-    # round-trip through show -> edit -> update like any other extra key.
-    for own_key in ("description", ENFORCE_KEY):
-        if own_key in merged:
-            extra[own_key] = merged[own_key]
-    atomic_write(path, render_rule(globs, body, interval, extra))
+    atomic_write(path, render_rule(globs, body, interval,
+                                   preserved_fields(merged, owned_last=True)))
     print(f"ok: updated {args.rule}")
     config = config_for(args)
     warn_if_long(args.rule, body, config)

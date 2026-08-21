@@ -7,17 +7,21 @@ parser alive in the injection path for a one-time job would be a permanent
 cost."""
 
 import os
-import stat
 
-from .common import (ENFORCE_KEY, HOOK, INTERVAL_KEY, LEGACY_INTERVAL_KEY,
-                     LEGACY_MAP_NAME, LEGACY_RULES_SUBDIR,
-                     MAX_ECHOED_NAME_CHARS, MAX_LEGACY_MAP_BYTES, OWN_KEYS,
-                     AdminError, atomic_write, existing_is_not_a_rule, fail,
-                     rules_in, scope_for, warn, warn_if_long)
+from .common import (HOOK, INTERVAL_KEY, LEGACY_INTERVAL_KEY, LEGACY_MAP_NAME,
+                     MAX_ECHOED_NAME_CHARS, AdminError, NotARegularFile,
+                     atomic_write, existing_is_not_a_rule, fail,
+                     preserved_fields, read_regular_file, rules_in, scope_for,
+                     warn, warn_if_long)
 from .config import (TYPE_SEPARATOR, config_for, describe_types,
                      split_type_prefix)
 from .rules import render_rule, submitted_interval
 from .validate import validate_scope
+
+LEGACY_RULES_SUBDIR = "rules"
+# A legacy map is a list of globs, never a document. The bound matters because
+# the file is repository data and used to be read whole.
+MAX_LEGACY_MAP_BYTES = 256 * 1024
 
 
 def strip_yaml_comment(line):
@@ -57,24 +61,11 @@ def read_legacy_rule(legacy_dir, name, limit):
     BEFORE stripping: a rule whose 4001st character is whitespace strips back to
     exactly the limit and would look like a rule that fits. migrate deletes the
     original, so a body silently cut here is a body lost."""
-    path = os.path.join(legacy_dir, name)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        raw = read_regular_file(os.path.join(legacy_dir, name), limit + 1)
     except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
-            fd = None
-            raw = handle.read(limit + 1)
-        return raw.strip(), len(raw) > limit
-    except Exception:
-        return None
-    finally:
-        if fd is not None:
-            os.close(fd)
+        return None  # missing, a symlink, not a regular file: `skipped` reports it
+    return raw.strip(), len(raw) > limit
 
 
 def read_legacy_map(map_path):
@@ -87,26 +78,12 @@ def read_legacy_map(map_path):
     could point rules-map.yml at any file the user can read and have its lines
     come back out through the `skipped <name>` messages — while the hook's own
     legacy notice actively told the agent to run this command."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(map_path, flags)
+        lines = read_regular_file(map_path, MAX_LEGACY_MAP_BYTES).split("\n")
+    except NotARegularFile:
+        fail(f"{map_path} is not a regular file; refusing to read it")
     except OSError as exc:
         fail(f"cannot read {map_path}: {exc}")
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            fd = None
-            fail(f"{map_path} is not a regular file; refusing to read it")
-        with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
-            fd = None  # fdopen owns it now
-            lines = handle.read(MAX_LEGACY_MAP_BYTES).split("\n")
-    except AdminError:
-        raise
-    except Exception as exc:
-        fail(f"cannot read {map_path}: {exc}")
-    finally:
-        if fd is not None:
-            os.close(fd)
     entries = []
     pending = None
     for raw in lines:
@@ -179,12 +156,9 @@ def migrate_interval_key(scope_dir):
         globs = HOOK.globs_of(fields)
         if not globs or not body:
             continue  # `validate` already reports these; rewriting would not help
-        extra = {k: v for k, v in fields.items() if k not in OWN_KEYS}
-        for own_key in ("description", ENFORCE_KEY):
-            if own_key in fields:
-                extra[own_key] = fields[own_key]
         atomic_write(os.path.join(scope_dir, name),
-                     render_rule(globs, body, submitted_interval(fields), extra))
+                     render_rule(globs, body, submitted_interval(fields),
+                                 preserved_fields(fields, owned_last=True)))
         rewritten += 1
         print(f"ok: {name}: {LEGACY_INTERVAL_KEY} -> {INTERVAL_KEY}")
     return rewritten
@@ -243,6 +217,7 @@ def migrate_legacy_map(args, scope_dir, anchor, config):
     # converted, reported none of the files already created, and could not be
     # resumed — every re-run died on the same entry.
     prepared, skipped = [], []
+    body_limit = HOOK.max_rule_chars(config)
     for name, globs in by_name.items():
         short = name[:MAX_ECHOED_NAME_CHARS]
         if not HOOK.is_valid_rule_name(name):
@@ -261,7 +236,7 @@ def migrate_legacy_map(args, scope_dir, anchor, config):
             skipped.append(f"{name}: a rule with that name already exists in the new "
                            f"format (--force replaces it)")
             continue
-        legacy = read_legacy_rule(legacy_dir, name, HOOK.max_rule_chars(config))
+        legacy = read_legacy_rule(legacy_dir, name, body_limit)
         if legacy is None:
             skipped.append(f"{name}: rule file missing or unreadable in "
                            f"{LEGACY_RULES_SUBDIR}/")
@@ -272,7 +247,7 @@ def migrate_legacy_map(args, scope_dir, anchor, config):
             continue
         if over_limit:
             skipped.append(f"{name}: longer than the "
-                           f"{HOOK.max_rule_chars(config)}-char limit; "
+                           f"{body_limit}-char limit; "
                            f"shorten or split it and migrate this entry by hand "
                            f"(converting it would cut the text and then delete the "
                            f"original)")

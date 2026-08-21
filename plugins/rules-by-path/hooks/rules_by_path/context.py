@@ -2,9 +2,18 @@
 the boundary tags, the separator, and the defanging that keeps rule content
 from forging either."""
 
-from .constants import (FORGED_FRAMING_TOKENS, RULE_SEPARATOR,
-                        RULES_CLOSE_TAG, RULES_OPEN_TAG, SUPERSEDE_NOTICE,
-                        TRUNCATION_NOTICE)
+from .constants import (DEFAULT_LANGUAGE, FORGED_FRAMING_TOKENS,
+                        RULE_SEPARATOR, RULES_CLOSE_TAG, RULES_OPEN_TAG)
+from .messages import (SUPERSEDE_NOTICE_KEY, TRUNCATION_NOTICE_KEY,
+                       messages_for)
+
+# Inserted one character into a marker to break it: visibly identical to the
+# reader, no longer the marker it was impersonating.
+ZERO_WIDTH_SPACE = "\u200b"
+
+
+def defang(marker):
+    return marker[0] + ZERO_WIDTH_SPACE + marker[1:]
 
 
 def neutralize(content):
@@ -24,18 +33,14 @@ def neutralize(content):
     markdown: only a line that is exactly the separator can be mistaken for one.
     """
     for token in FORGED_FRAMING_TOKENS:
-        if token in content:
-            # A zero-width space one character in: visibly identical, inert.
-            content = content.replace(token, token[0] + "\u200b" + token[1:])
-    if any(line.strip() == RULE_SEPARATOR for line in content.split("\n")):
-        content = "\n".join(
-            (RULE_SEPARATOR[0] + "\u200b" + RULE_SEPARATOR[1:]
-             if line.strip() == RULE_SEPARATOR else line)
-            for line in content.split("\n"))
-    return content
+        content = content.replace(token, defang(token))
+    defanged_separator = defang(RULE_SEPARATOR)
+    return "\n".join(
+        defanged_separator if line.strip() == RULE_SEPARATOR else line
+        for line in content.split("\n"))
 
 
-def build_context(blocks):
+def build_context(blocks, messages=None):
     """Assemble the injected text: the rule bodies, and nothing else.
 
     There is no preamble, no per-rule header and no provenance. Those existed to
@@ -48,7 +53,16 @@ def build_context(blocks):
 
     What remains is the boundary: an opening tag, a closing tag, and a separator
     line, all of which rule content has been defanged from emitting.
+
+    `messages` chooses the language of the two notices below, and is optional:
+    a caller with no configuration in hand — and every caller written before
+    the setting existed — gets English. The framing itself is not part of the
+    choice; the tags and the separator are identical in every language, because
+    they are what tells a reader where the block ends.
     """
+    messages = messages or messages_for(DEFAULT_LANGUAGE)
+    supersede_notice = messages[SUPERSEDE_NOTICE_KEY]
+    truncation_notice = messages[TRUNCATION_NOTICE_KEY]
     bodies = []
     for block in blocks:
         body = neutralize(block["text"])
@@ -58,9 +72,9 @@ def build_context(blocks):
         # truncation notice last (it is about where that version stops) — a
         # fixed order regardless of which combination of the two applies.
         if block.get("superseded"):
-            body = f"{SUPERSEDE_NOTICE}\n\n{body}"
+            body = f"{supersede_notice}\n\n{body}"
         if block.get("truncated"):
-            body += TRUNCATION_NOTICE
+            body += truncation_notice
         bodies.append(body)
     separator = f"\n{RULE_SEPARATOR}\n"
     return f"{RULES_OPEN_TAG}\n{separator.join(bodies)}\n{RULES_CLOSE_TAG}"

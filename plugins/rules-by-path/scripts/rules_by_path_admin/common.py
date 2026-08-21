@@ -7,25 +7,33 @@ and containment are the exact code the injection uses — a second implementatio
 here is how the two drift apart and a guard goes missing."""
 
 import os
+import stat
 import sys
 import tempfile
 
 
 RULES_DIR_RELPATH = os.path.join(".claude", "rules-by-path")
 LEGACY_MAP_NAME = "rules-map.yml"
-LEGACY_RULES_SUBDIR = "rules"
-# A legacy map is a list of globs, never a document. The bound matters because
-# the file is repository data and used to be read whole.
-MAX_LEGACY_MAP_BYTES = 256 * 1024
+# How much of a name or value a refusal message echoes back.
 MAX_ECHOED_NAME_CHARS = 60
-# Bounds for the "should this rule be split?" check (CLI only, never the hook).
-MAX_SCANNED_CHILDREN = 200
-MAX_SPLIT_SUGGESTIONS = 3
-MIN_MENTION_CHARS = 4  # below this a name matches prose by accident
 # scripts/rules_by_path_admin/common.py -> the plugin root is three levels up.
 HOOK_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "hooks", "rules-by-path.py")
+
+# The frontmatter keys this tool owns. RENDERED_KEYS are the ones `render_rule`
+# writes from its own arguments, so a copy arriving in a submitted rule is
+# dropped rather than written a second time — `remember_after` is the name
+# `remember_again_after` carried until 0.4.0, and keeping both would leave the
+# setting alive under two names forever. `description` and `enforce` are owned
+# too (so `validate` does not report them as unknown keys) but are carried
+# through verbatim, like any key this tool knows nothing about.
+INTERVAL_KEY = "remember_again_after"
+LEGACY_INTERVAL_KEY = "remember_after"
+DESCRIPTION_KEY = "description"
+ENFORCE_KEY = "enforce"
+RENDERED_KEYS = {"glob", "globs", INTERVAL_KEY, LEGACY_INTERVAL_KEY}
+OWN_KEYS = RENDERED_KEYS | {DESCRIPTION_KEY, ENFORCE_KEY}
 
 
 class AdminError(Exception):
@@ -37,6 +45,11 @@ class AdminError(Exception):
     converted and reporting none of the files it had already created."""
 
 
+class NotARegularFile(OSError):
+    """`read_regular_file` refused: a directory, a device, a fifo — anything a
+    bounded read of repository data must not be pointed at."""
+
+
 def fail(message):
     raise AdminError(message)
 
@@ -46,9 +59,7 @@ def warn(message):
 
 
 def load_hook_module():
-    """Import the plugin's hook so glob matching, frontmatter parsing, name
-    derivation and containment are the exact code the injection uses — a second
-    implementation here is how the two drift apart and a guard goes missing."""
+    """Import the plugin's hook and return it as a module."""
     import importlib.machinery
     import importlib.util
     if not os.path.isfile(HOOK_PATH):
@@ -90,6 +101,26 @@ def scope_for(args):
         fail(f"{scope_dir} is not safely owned (world-writable or another user's); "
              f"refusing to touch it")
     return scope_dir, anchor
+
+
+def read_regular_file(path, limit):
+    """The first `limit` characters of `path`, read without following a symlink
+    and without trusting what is at the other end.
+
+    O_NOFOLLOW plus the S_ISREG check is what stops a planted link or a fifo
+    from turning a bounded read of repository data into a read of the user's own
+    files, or into a hang. Every refusal leaves as an OSError, so each caller
+    decides whether it is fatal."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise NotARegularFile(f"{path} is not a regular file")
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
+            fd = None  # fdopen owns it now
+            return handle.read(limit)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def atomic_write(path, text):
@@ -162,21 +193,12 @@ def existing_is_not_a_rule(path):
     return not fields
 
 
-# `remember_after` is the name `remember_again_after` carried until 0.4.0. Both
-# are consumed here so a show -> edit -> update round trip on an old rule does
-# not end up writing the value twice, under two keys.
-OWN_KEYS = {"glob", "globs", "remember_again_after", "remember_after",
-           "description", "enforce"}
-LEGACY_INTERVAL_KEY = "remember_after"
-INTERVAL_KEY = "remember_again_after"
-ENFORCE_KEY = "enforce"
-
-
 def check_glob(glob):
     """A glob is written verbatim into frontmatter, so it must not be able to
     add lines to it."""
     if not glob or any(ch in glob for ch in "\r\n") or not glob.isprintable():
-        fail(f"invalid glob (one printable line, no control characters): {glob[:60]!r}")
+        fail(f"invalid glob (one printable line, no control characters): "
+             f"{glob[:MAX_ECHOED_NAME_CHARS]!r}")
     if len(glob) > HOOK.MAX_GLOB_CHARS:
         fail(f"glob longer than {HOOK.MAX_GLOB_CHARS} characters")
     return glob
@@ -191,8 +213,28 @@ def check_line_value(label, value):
     text = str(value)
     if any(ch in text for ch in "\r\n") or not text.isprintable():
         fail(f"invalid {label} value (one printable line, no control characters): "
-             f"{text[:60]!r}")
+             f"{text[:MAX_ECHOED_NAME_CHARS]!r}")
     return text
+
+
+def preserved_fields(fields, owned_last=False):
+    """The frontmatter `render_rule` must carry through unchanged: everything it
+    does not write from its own arguments. That includes `description` and
+    `enforce`, which this tool knows about but never derives — a show -> edit ->
+    update round trip has to return them exactly as they arrived.
+
+    `owned_last` writes those two after the keys this tool knows nothing about,
+    which is the order `update` and `migrate` have always produced; `add` keeps
+    the order the author submitted. Same keys either way, so the difference is
+    only where they land in the frontmatter of a rewritten file."""
+    if not owned_last:
+        return {key: value for key, value in fields.items()
+                if key not in RENDERED_KEYS}
+    extra = {key: value for key, value in fields.items() if key not in OWN_KEYS}
+    for key in (DESCRIPTION_KEY, ENFORCE_KEY):
+        if key in fields:
+            extra[key] = fields[key]
+    return extra
 
 
 def rule_path(scope_dir, name):
@@ -201,6 +243,16 @@ def rule_path(scope_dir, name):
              f"and '{HOOK.RULE_NAME_EXTRA_CHARS}', and must end in '.md' "
              f"(got {name[:80]!r})")
     return os.path.join(scope_dir, name)
+
+
+def existing_rule_path(scope_dir, name):
+    """The path of a rule that must already be there. A symlink counts as absent:
+    a rule file is content this tool owns, and following a link out of the scope
+    would let a cloned repository choose which file gets shown or rewritten."""
+    path = rule_path(scope_dir, name)
+    if os.path.islink(path) or not os.path.isfile(path):
+        fail(f"no such rule in this scope: {name}")
+    return path
 
 
 def warn_if_long(name, body, config=None):

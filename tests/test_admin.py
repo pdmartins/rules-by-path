@@ -1,9 +1,9 @@
-"""End-to-end tests for scripts/rules-by-path-admin.py (subprocess-level)."""
+"""End-to-end tests for scripts/rules-by-path-admin.py (subprocess-level).
 
-import json
+`migrate` has its own module, test_migrate.py."""
+
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -11,26 +11,12 @@ import util  # noqa: E402
 
 HOOK = util.load_hook_module()
 
+# A user config that replaces the shipped taxonomy with a single type.
+ONLY_MINE_TAXONOMY = {"rule_types": [{"prefix": "MINE", "name": "Mine",
+                                      "purpose": "Just one"}]}
 
-class AdminTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(self.proj)
-        self.scope = util.scope_dir(self.proj)
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def admin(self, *args, stdin=""):
-        return util.run_admin(list(args), self.home, stdin_text=stdin)
-
-    def read(self, name):
-        with open(os.path.join(self.scope, name), encoding="utf-8") as handle:
-            return handle.read()
-
+class AdminTest(util.SandboxTestCase):
     def test_init_creates_the_scope(self):
         proc = self.admin("init", "--root", self.proj)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -39,14 +25,14 @@ class AdminTest(unittest.TestCase):
     def test_init_global_uses_home(self):
         proc = self.admin("init", "--global")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue(os.path.isdir(util.scope_dir(self.home)))
+        self.assertTrue(os.path.isdir(self.global_scope))
 
     def test_add_writes_frontmatter_and_body(self):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/api/**",
                           "--type", "CONV", stdin="API RULE")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("CONV_src-api.md", proc.stdout)
-        content = self.read("CONV_src-api.md")
+        content = self.read_rule("CONV_src-api.md")
         self.assertIn("glob: src/api/**", content)
         self.assertIn("API RULE", content)
 
@@ -54,7 +40,7 @@ class AdminTest(unittest.TestCase):
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
                           "--glob", "lib/**", "--rule", "OTHR_code.md", stdin="RULE")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        content = self.read("OTHR_code.md")
+        content = self.read_rule("OTHR_code.md")
         self.assertIn("  - src/**", content)
         self.assertIn("  - lib/**", content)
 
@@ -65,11 +51,11 @@ class AdminTest(unittest.TestCase):
                           "--type", "OTHR", stdin="V2")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("already exists", proc.stderr)
-        self.assertIn("V1", self.read("OTHR_src.md"))
+        self.assertIn("V1", self.read_rule("OTHR_src.md"))
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
                           "--type", "OTHR", "--force", stdin="V2")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("V2", self.read("OTHR_src.md"))
+        self.assertIn("V2", self.read_rule("OTHR_src.md"))
 
     def test_two_rules_for_the_same_glob_are_allowed(self):
         first = self.admin("add", "--root", self.proj, "--glob", "src/api/**",
@@ -158,7 +144,7 @@ class AdminTest(unittest.TestCase):
         proc = self.admin("update", "--root", self.proj, "--rule", "OTHR_src.md",
                           stdin="REPLACED")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        content = self.read("OTHR_src.md")
+        content = self.read_rule("OTHR_src.md")
         self.assertIn("REPLACED", content)
         self.assertIn("glob: src/**", content, "update keeps the globs")
 
@@ -200,9 +186,7 @@ class AdminTest(unittest.TestCase):
         """What the CLI writes must be exactly what the hook consumes."""
         self.admin("add", "--root", self.proj, "--glob", "src/api/**",
                    "--type", "OTHR", stdin="ROUNDTRIP RULE")
-        proc = util.run_hook(util.read_payload(
-            "Read", os.path.join(self.proj, "src", "api", "x.py")), self.home)
-        self.assertIn("ROUNDTRIP RULE", util.injected_text(proc))
+        self.assertIn("ROUNDTRIP RULE", self.inject("src/api/x.py"))
 
     def test_validate_flags_a_name_outside_the_type_convention(self):
         self.admin("add", "--root", self.proj, "--glob", "src/**",
@@ -242,10 +226,10 @@ class AdminTest(unittest.TestCase):
     def test_remember_again_after_is_written_and_validated(self):
         self.admin("add", "--root", self.proj, "--glob", "src/**", "--type", "OTHR",
                    "--remember-again-after", "never", stdin="RULE")
-        self.assertIn("remember_again_after: never", self.read("OTHR_src.md"))
+        self.assertIn("remember_again_after: never", self.read_rule("OTHR_src.md"))
         self.admin("update", "--root", self.proj, "--rule", "OTHR_src.md",
                    "--remember-again-after", "30k", stdin="RULE")
-        self.assertIn("remember_again_after: 30k", self.read("OTHR_src.md"))
+        self.assertIn("remember_again_after: 30k", self.read_rule("OTHR_src.md"))
         proc = self.admin("add", "--root", self.proj, "--glob", "lib/**",
                           "--rule", "OTHR_lib.md", "--remember-again-after", "soon",
                           stdin="X")
@@ -258,12 +242,12 @@ class AdminTest(unittest.TestCase):
         what a type is."""
         self.admin("add", "--root", self.proj, "--glob", "src/**",
                    "--type", "BUSN", "--rule", "BUSN_invariant.md", stdin="RULE")
-        self.assertIn("remember_again_after: 20k", self.read("BUSN_invariant.md"))
+        self.assertIn("remember_again_after: 20k", self.read_rule("BUSN_invariant.md"))
         # An explicit value still wins over the type's default.
         self.admin("add", "--root", self.proj, "--glob", "lib/**",
                    "--type", "BUSN", "--rule", "BUSN_other.md",
                    "--remember-again-after", "80k", stdin="RULE")
-        self.assertIn("remember_again_after: 80k", self.read("BUSN_other.md"))
+        self.assertIn("remember_again_after: 80k", self.read_rule("BUSN_other.md"))
 
     def test_nonexistent_root_fails(self):
         proc = self.admin("list", "--root", os.path.join(self.tmp.name, "missing"))
@@ -271,96 +255,16 @@ class AdminTest(unittest.TestCase):
         self.assertIn("does not exist", proc.stderr)
 
 
-class MigrationTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(self.proj)
-        self.scope = util.scope_dir(self.proj)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def admin(self, *args, stdin=""):
-        return util.run_admin(list(args), self.home, stdin_text=stdin)
-
-    def write_legacy(self, entries, bodies):
-        os.makedirs(os.path.join(self.scope, "rules"), exist_ok=True)
-        lines = ["rules:"]
-        for glob, name in entries:
-            lines.append(f'  - glob: "{glob}"')
-            if name:
-                lines.append(f'    rule: "{name}"')
-        with open(os.path.join(self.scope, "rules-map.yml"), "w", encoding="utf-8") as h:
-            h.write("\n".join(lines) + "\n")
-        for name, body in bodies.items():
-            with open(os.path.join(self.scope, "rules", name), "w", encoding="utf-8") as h:
-                h.write(body)
-
-    def test_migrate_converts_and_removes_the_legacy_files(self):
-        self.write_legacy([("src/api/**", "src--api.md"), ("docs/**", None)],
-                          {"src--api.md": "API RULE", "docs.md": "DOCS RULE"})
-        proc = self.admin("migrate", "--root", self.proj)
-        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        with open(os.path.join(self.scope, "src--api.md"), encoding="utf-8") as h:
-            content = h.read()
-        self.assertIn("glob: src/api/**", content)
-        self.assertIn("API RULE", content)
-        self.assertFalse(os.path.isfile(os.path.join(self.scope, "rules-map.yml")))
-        self.assertFalse(os.path.isdir(os.path.join(self.scope, "rules")))
-
-    def test_migrated_rules_actually_inject(self):
-        self.write_legacy([("src/**", None)], {"src.md": "MIGRATED RULE"})
-        self.admin("migrate", "--root", self.proj)
-        proc = util.run_hook(util.read_payload(
-            "Read", os.path.join(self.proj, "src", "a.py")), self.home)
-        self.assertIn("MIGRATED RULE", util.injected_text(proc))
-
-    def test_migrate_merges_globs_that_shared_a_rule_file(self):
-        self.write_legacy([("src/**", "shared.md"), ("lib/**", "shared.md")],
-                          {"shared.md": "SHARED"})
-        self.admin("migrate", "--root", self.proj)
-        with open(os.path.join(self.scope, "shared.md"), encoding="utf-8") as h:
-            content = h.read()
-        self.assertIn("  - src/**", content)
-        self.assertIn("  - lib/**", content)
-
-    def test_migrate_keeps_legacy_files_when_something_is_skipped(self):
-        self.write_legacy([("src/**", None), ("gone/**", None)], {"src.md": "OK"})
-        proc = self.admin("migrate", "--root", self.proj)
-        self.assertIn("skipped", proc.stderr)
-        self.assertTrue(os.path.isfile(os.path.join(self.scope, "rules-map.yml")),
-                        "nothing is deleted while an entry is unresolved")
-
-    def test_migrate_without_legacy_files_is_a_noop(self):
-        proc = self.admin("migrate", "--root", self.proj)
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("nothing to migrate", proc.stdout)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class SplitSuggestionTest(unittest.TestCase):
+class SplitSuggestionTest(util.SandboxTestCase):
     """A rule hands its WHOLE text to every file its glob matches, so a rule
     carrying constraints that govern only part of that tree should be split."""
 
+    PROJECT_SUBDIRS = ("src/Api/Controllers",)
+
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(os.path.join(self.proj, "src", "Api", "Controllers"))
-        open(os.path.join(self.proj, "src", "Api", "DependencyInjection.cs"), "w").close()
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def admin(self, *args, stdin=""):
-        return util.run_admin(list(args), self.home, stdin_text=stdin)
+        super().setUp()
+        util.write_file(os.path.join(self.proj, "src", "Api",
+                                     "DependencyInjection.cs"), "")
 
     def test_add_points_at_the_narrower_globs_it_could_use(self):
         body = ("Controllers follow pattern X.\n"
@@ -402,27 +306,9 @@ class SplitSuggestionTest(unittest.TestCase):
         self.assertNotIn("narrower than it", proc.stdout + proc.stderr)
 
 
-class ConfigCommandTest(unittest.TestCase):
+class ConfigCommandTest(util.SandboxTestCase):
     """`config` is how the manage skill learns the rule types, so nothing else
     may carry a second copy of them."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(self.proj)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def admin(self, *args, stdin=""):
-        return util.run_admin(list(args), self.home, stdin_text=stdin)
-
-    def write_config(self, scope_dir, payload):
-        os.makedirs(scope_dir, exist_ok=True)
-        with open(os.path.join(scope_dir, "config.json"), "w", encoding="utf-8") as h:
-            json.dump(payload, h)
 
     def test_it_prints_the_shipped_types_and_defaults(self):
         proc = self.admin("config", "--root", self.proj)
@@ -432,16 +318,14 @@ class ConfigCommandTest(unittest.TestCase):
         self.assertIn("remember_again_after", proc.stdout)
 
     def test_it_names_the_layer_each_value_came_from(self):
-        self.write_config(util.scope_dir(self.home),
-                          {"rule_types": [{"prefix": "MINE", "name": "Mine",
-                                           "purpose": "Just one"}]})
+        util.write_config(self.global_scope, ONLY_MINE_TAXONOMY)
         proc = self.admin("config", "--root", self.proj)
         self.assertIn("MINE", proc.stdout)
         self.assertIn(os.path.join(self.home, ".claude"), proc.stdout)
         self.assertIn("(absent)", proc.stdout, "the project has no config of its own")
 
     def test_a_configured_size_limit_is_what_add_and_validate_report(self):
-        self.write_config(util.scope_dir(self.home),
+        util.write_config(self.global_scope,
                           {"rule_size": {"max_chars": 900, "warn_chars": 300}})
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
                           "--type", "OTHR", stdin="L" * 400)
@@ -457,9 +341,7 @@ class ConfigCommandTest(unittest.TestCase):
         self.assertIn("max_chars", proc.stdout)
 
     def test_a_configured_taxonomy_is_what_add_enforces(self):
-        self.write_config(util.scope_dir(self.home),
-                          {"rule_types": [{"prefix": "MINE", "name": "Mine",
-                                           "purpose": "Just one"}]})
+        util.write_config(self.global_scope, ONLY_MINE_TAXONOMY)
         proc = self.admin("add", "--root", self.proj, "--glob", "src/**",
                           "--type", "ARCH", stdin="X")
         self.assertNotEqual(proc.returncode, 0, "ARCH is no longer configured")
@@ -469,79 +351,5 @@ class ConfigCommandTest(unittest.TestCase):
         self.assertIn("MINE_src.md", proc.stdout)
 
 
-class MigrateToTypedNamesTest(unittest.TestCase):
-    """0.4.0 renamed the type prefixes and the frontmatter key; `migrate` is
-    what carries an existing scope across."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(self.proj)
-        self.scope = util.scope_dir(self.proj)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def admin(self, *args, stdin=""):
-        return util.run_admin(list(args), self.home, stdin_text=stdin)
-
-    def read(self, name):
-        with open(os.path.join(self.scope, name), encoding="utf-8") as handle:
-            return handle.read()
-
-    def test_legacy_prefixes_are_renamed(self):
-        util.write_rule(self.proj, "Business_order-not-cancellable.md",
-                        "src/Domain/**", "An invoiced order cannot be cancelled.")
-        util.write_rule(self.proj, "Convention_api-problemdetails.md",
-                        "src/Api/**", "Errors return ProblemDetails.")
-        proc = self.admin("migrate", "--root", self.proj)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.scope, "BUSN_order-not-cancellable.md")))
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.scope, "CONV_api-problemdetails.md")))
-        self.assertFalse(os.path.isfile(
-            os.path.join(self.scope, "Business_order-not-cancellable.md")))
-
-    def test_the_renamed_frontmatter_key_is_rewritten(self):
-        util.write_rule(self.proj, "OTHR_src.md", "src/**", "Rule text.",
-                        extra_frontmatter=["remember_after: 40k"])
-        self.admin("migrate", "--root", self.proj)
-        content = self.read("OTHR_src.md")
-        self.assertIn("remember_again_after: 40k", content)
-        self.assertNotIn("\nremember_after:", content)
-
-    def test_an_untyped_rule_is_reported_never_guessed(self):
-        util.write_rule(self.proj, "hv-dotnet-stack.md", "**/*.cs", "Stack rules.")
-        proc = self.admin("migrate", "--root", self.proj)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("hv-dotnet-stack.md", proc.stdout)
-        self.assertIn("no type prefix", proc.stdout)
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.scope, "hv-dotnet-stack.md")), "left alone")
-
-    def test_migrating_twice_changes_nothing_the_second_time(self):
-        util.write_rule(self.proj, "Business_x.md", "src/**", "Rule.",
-                        extra_frontmatter=["remember_after: 40k"])
-        self.admin("migrate", "--root", self.proj)
-        before = self.read("BUSN_x.md")
-        proc = self.admin("migrate", "--root", self.proj)
-        self.assertIn("nothing to migrate", proc.stdout)
-        self.assertEqual(before, self.read("BUSN_x.md"))
-
-    def test_a_rename_does_not_clobber_an_existing_rule(self):
-        util.write_rule(self.proj, "Business_x.md", "src/**", "OLD")
-        util.write_rule(self.proj, "BUSN_x.md", "src/**", "CURRENT")
-        proc = self.admin("migrate", "--root", self.proj)
-        self.assertIn("CURRENT", self.read("BUSN_x.md"))
-        self.assertIn("already exists", proc.stderr)
-
-    def test_a_migrated_scope_still_injects(self):
-        util.write_rule(self.proj, "Business_x.md", "src/**", "MIGRATED RULE",
-                        extra_frontmatter=["remember_after: 40k"])
-        self.admin("migrate", "--root", self.proj)
-        proc = util.run_hook(util.read_payload(
-            "Read", os.path.join(self.proj, "src", "a.py")), self.home)
-        self.assertIn("MIGRATED RULE", util.injected_text(proc) or "")
+if __name__ == "__main__":
+    unittest.main()

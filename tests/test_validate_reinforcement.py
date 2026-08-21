@@ -5,34 +5,28 @@ for these, unlike the errors that mean something will not work at all."""
 
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import util  # noqa: E402
 
+# The two rule bodies the lint reads, and the two notes it may print.
+PROHIBITION_BODY = "Never log the request body."
+CONVENTION_BODY = "Controllers are named PascalCase and end in Controller."
+PROHIBITION_NOTE = "reads like a prohibition"
+OVER_TREATMENT_NOTE = "over-treatment"
 
-class ReinforcementLintTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(self.proj)
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
+class ReinforcementLintTest(util.SandboxTestCase):
     def validate(self):
-        return util.run_admin(["validate", "--root", self.proj], self.home)
+        return self.admin("validate", "--root", self.proj)
 
     def test_a_prohibition_with_reinforcement_off_gets_a_note(self):
-        util.write_rule(self.proj, "BUSN_no-secrets.md", "src/**",
-                        "Never log the request body.",
+        util.write_rule(self.proj, "BUSN_no-secrets.md", "src/**", PROHIBITION_BODY,
                         extra_frontmatter=["remember_again_after: never"])
         proc = self.validate()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("reads like a prohibition", proc.stdout)
+        self.assertIn(PROHIBITION_NOTE, proc.stdout)
         self.assertIn("BUSN_no-secrets.md", proc.stdout)
 
     def test_the_note_also_fires_when_never_is_inherited_from_the_type(self):
@@ -43,46 +37,39 @@ class ReinforcementLintTest(unittest.TestCase):
                         "You must not use abbreviations in public method names.")
         proc = self.validate()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("reads like a prohibition", proc.stdout)
+        self.assertIn(PROHIBITION_NOTE, proc.stdout)
 
     def test_a_prohibition_with_reinforcement_on_gets_no_note(self):
-        util.write_rule(self.proj, "BUSN_no-secrets.md", "src/**",
-                        "Never log the request body.",
+        util.write_rule(self.proj, "BUSN_no-secrets.md", "src/**", PROHIBITION_BODY,
                         extra_frontmatter=["remember_again_after: 20k"])
-        proc = self.validate()
-        self.assertNotIn("reads like a prohibition", proc.stdout)
+        self.assertNotIn(PROHIBITION_NOTE, self.validate().stdout)
 
     def test_a_tight_interval_with_no_prohibition_gets_an_over_treatment_note(self):
-        util.write_rule(self.proj, "CONV_style.md", "src/**",
-                        "Controllers are named PascalCase and end in Controller.",
+        util.write_rule(self.proj, "CONV_style.md", "src/**", CONVENTION_BODY,
                         extra_frontmatter=["remember_again_after: 3 calls"])
         proc = self.validate()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("over-treatment", proc.stdout)
+        self.assertIn(OVER_TREATMENT_NOTE, proc.stdout)
 
     def test_a_tight_interval_on_a_prohibition_is_not_over_treatment(self):
         """A prohibition repeating tightly is the whole point of reinforcing
         it in the first place — not the pattern this note is about."""
-        util.write_rule(self.proj, "BUSN_no-secrets.md", "src/**",
-                        "Never log the request body.",
+        util.write_rule(self.proj, "BUSN_no-secrets.md", "src/**", PROHIBITION_BODY,
                         extra_frontmatter=["remember_again_after: 3 calls"])
-        proc = self.validate()
-        self.assertNotIn("over-treatment", proc.stdout)
+        self.assertNotIn(OVER_TREATMENT_NOTE, self.validate().stdout)
 
     def test_a_normal_interval_with_no_prohibition_gets_no_note(self):
-        util.write_rule(self.proj, "CONV_style.md", "src/**",
-                        "Controllers are named PascalCase and end in Controller.",
+        util.write_rule(self.proj, "CONV_style.md", "src/**", CONVENTION_BODY,
                         extra_frontmatter=["remember_again_after: 50k"])
         proc = self.validate()
-        self.assertNotIn("over-treatment", proc.stdout)
-        self.assertNotIn("reads like a prohibition", proc.stdout)
+        self.assertNotIn(OVER_TREATMENT_NOTE, proc.stdout)
+        self.assertNotIn(PROHIBITION_NOTE, proc.stdout)
 
     def test_a_portuguese_prohibition_phrase_is_recognised(self):
         util.write_rule(self.proj, "BUSN_invariante.md", "src/**",
                         "O pedido nunca pode ser cancelado após faturado.",
                         extra_frontmatter=["remember_again_after: never"])
-        proc = self.validate()
-        self.assertIn("reads like a prohibition", proc.stdout)
+        self.assertIn(PROHIBITION_NOTE, self.validate().stdout)
 
 
 if __name__ == "__main__":

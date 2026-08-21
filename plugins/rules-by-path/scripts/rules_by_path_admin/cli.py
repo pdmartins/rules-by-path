@@ -1,5 +1,6 @@
-"""
-"""
+"""Argument parsing and dispatch: every subcommand this CLI accepts is one
+entry of COMMANDS, so the list a user sees and the function that runs cannot
+drift apart."""
 
 import argparse
 import sys
@@ -12,12 +13,17 @@ from .rules import (cmd_add, cmd_init, cmd_list, cmd_remove, cmd_show,
                     cmd_update, cmd_which)
 from .validate import cmd_validate
 
+# Declaration order is what `--help` and the "invalid choice" error list.
+COMMANDS = {"init": cmd_init, "list": cmd_list, "show": cmd_show,
+            "which": cmd_which, "add": cmd_add, "update": cmd_update,
+            "remove": cmd_remove, "validate": cmd_validate,
+            "config": cmd_config, "migrate": cmd_migrate,
+            "enforce": cmd_enforce}
+
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["init", "list", "show", "which", "add",
-                                            "update", "remove", "validate",
-                                            "config", "migrate", "enforce"])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=list(COMMANDS))
     scope = parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--root", help="project root (the folder containing .claude/)")
     scope.add_argument("--global", dest="use_global", action="store_true",
@@ -46,23 +52,22 @@ def main():
         fail("'add' requires --glob")
     if args.command in ("show", "update") and not args.rule:
         fail(f"'{args.command}' requires --rule")
-    if args.command == "remove" and not (args.rule or args.glob):
-        fail("'remove' requires --rule or --glob")
-    if args.command == "remove" and args.rule and args.glob:
-        fail("'remove' takes --rule OR --glob, not both")
-    if args.command == "remove" and args.glob:
-        args.glob = args.glob[0]
+    if args.command == "remove":
+        if not (args.rule or args.glob):
+            fail("'remove' requires --rule or --glob")
+        if args.rule and args.glob:
+            fail("'remove' takes --rule OR --glob, not both")
+        if args.glob:
+            args.glob = args.glob[0]
     if args.command == "which" and not args.path:
         fail("'which' requires --path")
-    if args.command == "enforce" and not (args.list or args.sync):
-        fail("'enforce' requires --list or --sync")
-    if args.command == "enforce" and args.list and args.sync:
-        fail("'enforce' takes --list OR --sync, not both")
+    if args.command == "enforce":
+        if not (args.list or args.sync):
+            fail("'enforce' requires --list or --sync")
+        if args.list and args.sync:
+            fail("'enforce' takes --list OR --sync, not both")
 
-    {"init": cmd_init, "list": cmd_list, "show": cmd_show, "which": cmd_which,
-     "add": cmd_add, "update": cmd_update, "remove": cmd_remove,
-     "validate": cmd_validate, "config": cmd_config,
-     "migrate": cmd_migrate, "enforce": cmd_enforce}[args.command](args)
+    COMMANDS[args.command](args)
 
 
 def run():

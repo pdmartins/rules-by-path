@@ -5,7 +5,6 @@ at a token high-water mark the context no longer holds."""
 
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -69,32 +68,17 @@ class DetectContextRegressionTest(unittest.TestCase):
         self.assertFalse(HOOK.detect_context_regression(state, 10))
 
 
-class CompactionRaceFallbackEndToEndTest(unittest.TestCase):
+class CompactionRaceFallbackEndToEndTest(util.SandboxTestCase):
     """Acceptance case: the rule comes back on the very tool call where the
     token count collapses, even though --reset-session never ran. That is
     exactly the race the async SessionStart reset can lose."""
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
-
-    def tearDown(self):
-        self.tmp.cleanup()
+    PROJECT_SUBDIRS = ("src",)
 
     def test_compaction_drop_reinjects_without_waiting_for_the_async_reset(self):
         util.write_rule(self.proj, "src.md", "src/**", "Rule text.",
                         extra_frontmatter=["remember_again_after: 500k"])
-        transcript = os.path.join(self.tmp.name, "regress.jsonl")
-
-        def touch_with(total):
-            util.write_transcript(transcript, total)
-            return util.injected_text(util.run_hook(util.read_payload(
-                "Read", os.path.join(self.proj, "src", "a.py"), session="regress",
-                transcript_path=transcript), self.home))
-
+        touch_with = self.inject_with_transcript
         self.assertIsNotNone(touch_with(200_000), "first touch injects")
         self.assertIsNone(touch_with(210_000), "still well within the 500k distance")
         text = touch_with(5_000)  # simulated compaction: context collapsed

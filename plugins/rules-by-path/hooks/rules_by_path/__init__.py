@@ -48,6 +48,8 @@ script `scripts/rules-by-path-admin.py` in this plugin.
 Layout — one concern per module, none over 400 lines:
 
     constants.py    every tunable, plus `warn`
+    messages.py     the injected text, in every language the plugin ships
+    configfile.py   reading one config.json off disk, untrusted
     config.py       config.json: the rule taxonomy and the repeat defaults
     reinject.py     the re-injection budget: its config key and its clamp
     frontmatter.py  the rule header: parsing, globs, remember_again_after
@@ -64,16 +66,22 @@ exists because `hooks.json`, the `bin/` launchers, the admin and the tests all
 address the hook by that path.
 """
 
-from .constants import (ADMIN_COMMAND, CONFIG_FILE_NAME,
+from .constants import (ADMIN_COMMAND, BRAZILIAN_PORTUGUESE,
+                        CONFIG_FILE_NAME, DEFAULT_LANGUAGE,
                         DEFAULT_REMEMBER_AGAIN_CALLS,
                         DEFAULT_REMEMBER_AGAIN_TOKENS,
                         ENFORCE_DENY_REASON_TEMPLATE, FILE_PATH_KEYS,
-                        FORGED_FRAMING_TOKENS, LEGACY_MAP_NAME, LEGACY_NOTICE,
+                        FORGED_FRAMING_TOKENS, HARNESS_MARKER,
+                        LANGUAGE_EXTRA_CHARS,
+                        LANGUAGE_FORBIDDEN_CHARS, LANGUAGE_KEY,
+                        LEGACY_MAP_NAME,
+                        LEGACY_NOTICE,
                         LEGACY_REMEMBER_ENV_VAR, MATCH_BUDGET_SECONDS,
                         MAX_ANCESTOR_STEPS, MAX_CONFIG_BYTES,
                         MAX_CONFIGURABLE_REINJECT_BUDGET,
                         MAX_FRONTMATTER_BYTES, MAX_GLOB_CHARS,
-                        MAX_GLOBS_PER_RULE, MAX_REINJECTIONS_PER_RULE,
+                        MAX_GLOBS_PER_RULE, MAX_LANGUAGE_CHARS,
+                        MAX_REINJECTIONS_PER_RULE,
                         MAX_RULE_CHARS, MAX_RULE_NAME_CHARS, MAX_RULE_TYPES,
                         MAX_RULES_PER_SCOPE, MAX_SCOPES, MAX_SESSION_ID_CHARS,
                         MAX_TOTAL_CHARS, MAX_TYPE_PREFIX_CHARS,
@@ -84,14 +92,23 @@ from .constants import (ADMIN_COMMAND, CONFIG_FILE_NAME,
                         RULE_NAME_EXTRA_CHARS, RULE_SEPARATOR, RULE_WARN_CHARS,
                         RULES_CLOSE_TAG, RULES_DIR_RELPATH, RULES_OPEN_TAG,
                         SESSION_NOTICE, STATE_MAX_AGE_SECONDS,
-                        SUPERSEDE_NOTICE, TOKEN_REGRESSION_SLACK,
-                        TRANSCRIPT_TAIL_BYTES, TRUNCATION_NOTICE,
+                        STATE_READ_CHUNK_BYTES, SUPERSEDE_NOTICE,
+                        TOKEN_REGRESSION_SLACK, TRANSCRIPT_TAIL_BYTES,
+                        TRUNCATION_NOTICE, TRUNCATION_NOTICES,
                         WRITE_TOOL_NAMES, warn)
+from .messages import (ENFORCE_DENY_REASON_TEMPLATE_KEY,
+                       LANGUAGE_NORMAL_FORM, LEGACY_NOTICE_KEY,
+                       MESSAGE_KEYS, MESSAGES, SESSION_NOTICE_KEY,
+                       SHIPPED_LANGUAGES, SUPERSEDE_NOTICE_KEY,
+                       TRUNCATION_NOTICE_KEY, canonical_language,
+                       has_translation, messages_for, normalize_language,
+                       sanitize_language)
 from .frontmatter import (enforce_of, globs_of, parse_frontmatter,
                           parse_remember_again_after, parse_size,
                           remember_again_after_of, unquote)
-from .config import (config_path_for, find_rule_type, load_config, load_layer,
-                     max_rule_chars, read_config_file,
+from .configfile import config_path_for, read_config_file
+from .config import (find_rule_type, language, load_config,
+                     load_layer, max_rule_chars,
                      remember_again_after_default,
                      remember_again_after_for_type, rule_types, sanitize_config,
                      type_prefixes, warn_rule_chars)
@@ -102,11 +119,12 @@ from .discovery import (find_scopes, is_safely_owned, scope_is_contained,
                         usable_scope)
 from .rules import (derive_rule_name, has_legacy_map, is_valid_rule_name,
                     read_rule_file, scope_index)
-from .state import (cleanup_stale_state, close_state, coerce_seen_entry,
-                    context_size, detect_context_regression, is_due,
-                    lock_exclusive, open_state, pop_superseded_entries,
+from .state import (cleanup_stale_state, close_state, coerce_int,
+                    coerce_seen_entry, context_size, detect_context_regression,
+                    is_due, lock_exclusive, open_state, pop_superseded_entries,
                     save_state, state_dir, state_file_for)
-from .context import build_context, neutralize
-from .main import (cli, collect_candidates, enforce_denial,
-                   extract_file_path, is_inside_rules_dir, main, path_targets,
-                   reset_session, session_notice)
+from .context import build_context, defang, neutralize
+from .main import (build_blocks, cli, collect_candidates, config_for_scopes,
+                   enforce_denial, extract_file_path, is_inside_rules_dir,
+                   main, messages_for_scopes, path_targets, reset_session,
+                   session_notice, trusted_scopes)

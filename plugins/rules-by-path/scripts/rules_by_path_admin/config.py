@@ -24,6 +24,22 @@ from .common import (HOOK, INTERVAL_KEY, RULES_DIR_RELPATH, check_line_value,
 # wrote by hand, over its file name, would be the worst possible behaviour.
 TYPE_SEPARATOR = "_"
 
+# The units a `remember_again_after` default can be expressed in, and what each
+# one means — printed by `config`, in this order.
+INTERVAL_UNIT_LABELS = {"tokens": "when the context size can be measured",
+                        "calls": "when only tool calls can be counted"}
+
+# What `config` says about `language`. The second line is the one that earns
+# its space: a language the plugin ships no translation of is a legitimate
+# setting — the rules are written in it — and only the text the hook wraps
+# them in falls back to English. A user should learn that from the CLI rather
+# than by noticing English scaffolding around their own rules.
+LANGUAGE_LABEL = "the language rule bodies are written in"
+LANGUAGE_TRANSLATED = ("the text the hook injects around them is translated "
+                       "to it as well")
+LANGUAGE_FALLBACK = ("the text the hook injects around them falls back to "
+                     "{fallback} — translations shipped: {shipped}")
+
 
 def config_layers(args):
     """(scope dirs whose config applies, how many of them are trusted).
@@ -142,12 +158,10 @@ def cmd_config(args):
     print(f"  (from {origin})")
 
     print(f"\n{INTERVAL_KEY} defaults, for rules that declare none:")
-    for unit in ("tokens", "calls"):
+    for unit, label in INTERVAL_UNIT_LABELS.items():
         value = config.get(INTERVAL_KEY, {}).get(unit)
         shown = value if value else "(built-in fallback)"
         where = sources.get(f"{INTERVAL_KEY}.{unit}", "built in")
-        label = "when the context size can be measured" if unit == "tokens" \
-            else "when only tool calls can be counted"
         print(f"  {unit}: {shown}  — {label} (from {where})")
 
     print("\nrule size:")
@@ -157,6 +171,21 @@ def cmd_config(args):
         shown = value if value else "(built-in fallback)"
         where = sources.get(f"rule_size.{key}", "built in")
         print(f"  {key}: {shown}  — {label} (from {where})")
+
+    chosen = HOOK.language(config)
+    print(f"\n{HOOK.LANGUAGE_KEY}:")
+    # Quoted, like `validate` quotes it: the value can come from a project
+    # layer that arrived with a cloned repository, and 32 allowlisted characters
+    # are enough to word a short imperative. Quoting keeps it visibly a value
+    # being reported rather than a sentence in the CLI's own voice.
+    print(f"  {chosen!r}  — {LANGUAGE_LABEL} "
+          f"(from {sources.get(HOOK.LANGUAGE_KEY, plugin_config)})")
+    if HOOK.has_translation(chosen):
+        print(f"  {LANGUAGE_TRANSLATED}")
+    else:
+        print("  " + LANGUAGE_FALLBACK.format(
+            fallback=HOOK.DEFAULT_LANGUAGE,
+            shipped=", ".join(HOOK.SHIPPED_LANGUAGES)))
 
     print("\nlayers, nearest last:")
     print(f"  {plugin_config}")

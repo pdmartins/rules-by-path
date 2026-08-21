@@ -194,8 +194,9 @@ remember_again_after: 50k
 
 ## Configuration
 
-The rule taxonomy, the repeat defaults and the size limits live in a
-`config.json` read from three layers, each overriding the one before it:
+The rule taxonomy, the repeat defaults, the size limits and the language rules
+are written in all live in a `config.json` read from three layers, each
+overriding the one before it:
 
 | Layer | Where | Trusted |
 |---|---|---|
@@ -211,7 +212,8 @@ The rule taxonomy, the repeat defaults and the size limits live in a
      "remember_again_after": "20k"}
   ],
   "remember_again_after": {"tokens": "30k", "calls": "25 calls"},
-  "rule_size": {"max_chars": 4000, "warn_chars": 2000}
+  "rule_size": {"max_chars": 4000, "warn_chars": 2000},
+  "language": "pt-BR"
 }
 ```
 
@@ -226,6 +228,32 @@ treated like any other repository content: its intervals are clamped to a floor
 bounded to one printable line, its prefixes must be ASCII letters and digits,
 and it may **shorten** `max_chars` but never lengthen it. A layer that cannot be
 parsed is skipped with a warning; nothing about a config can stop injection.
+
+### `language`
+
+`language` is what the manage skill writes rule **bodies** in, so the choice
+stops being re-made from the language of each conversation. It is also the
+language of the text the hook injects around them — the session notice, the
+supersede and truncation notices, the reason an `enforce: deny` gives —
+whenever the plugin ships a translation of it. Shipped: `en` (the default) and
+`pt-BR`; `pt_br` and `PT-BR` select the same one.
+
+Any other language is a perfectly good value: the rules are written in it, and
+only that surrounding text falls back to English — `config` and `validate` both
+say so rather than letting it be a surprise. The scaffolding is never taken
+from configuration, only selected by it: a layer arrives with a cloned
+repository, and supplying the wording of the text the model trusts most is not
+something a clone may do. For the same reason the value itself is bounded to 32
+characters of visible letters, digits, spaces and `-_()`, normalized to NFKC so
+a lookalike of `en` is `en`, and anything else is warned about and ignored. The
+allowlist buys exactly one thing — the value cannot forge a delimiter, a
+frontmatter key or a second line — so the CLI quotes it rather than reading it
+out as prose. The `enforce: deny` reason is the one exception to the project
+winning: that sentence speaks for you against the repository being blocked, so
+only your own layers choose the language it arrives in.
+
+Rule file names, type prefixes (`BUSN`, `ARCH`, …) and frontmatter keys are
+identifiers, not prose, and never translate.
 
 ## Glob semantics
 

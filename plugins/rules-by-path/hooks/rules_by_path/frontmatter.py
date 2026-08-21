@@ -138,13 +138,13 @@ def parse_remember_again_after(raw, source):
         return (0, None)
     unit = "tokens"
     unit_stated = False  # whether the author wrote the unit or left it implied
-    if text.endswith("calls") or text.endswith("call"):
+    if text.endswith(("calls", "call")):
         unit, unit_stated = "calls", True
         text = text.rsplit("call", 1)[0]
     elif text.endswith("c"):
         unit, unit_stated = "calls", True
         text = text[:-1]
-    elif text.endswith("tokens") or text.endswith("token"):
+    elif text.endswith(("tokens", "token")):
         unit_stated = True
         text = text.rsplit("token", 1)[0]
     try:

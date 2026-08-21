@@ -20,7 +20,7 @@ def sanitize_reinject_budget(raw, source):
     exists to prevent."""
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         warn(f"{source}: 'reinject_budget' must be a whole number; ignored")
         return None
     clamped = max(0, min(value, MAX_CONFIGURABLE_REINJECT_BUDGET))

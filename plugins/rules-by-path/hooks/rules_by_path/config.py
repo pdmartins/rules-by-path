@@ -17,70 +17,24 @@ an unreadable or nonsensical layer is warned about and skipped, and the plugin
 keeps running on the layer below it.
 """
 
-import json
 import os
-import stat
 
-from .constants import (CONFIG_FILE_NAME, DEFAULT_REMEMBER_AGAIN_CALLS,
-                        DEFAULT_REMEMBER_AGAIN_TOKENS, LEGACY_REMEMBER_ENV_VAR,
-                        MAX_CONFIG_BYTES, MAX_RULE_CHARS, MAX_RULE_TYPES,
+from .constants import (DEFAULT_LANGUAGE,
+                        DEFAULT_REMEMBER_AGAIN_CALLS,
+                        DEFAULT_REMEMBER_AGAIN_TOKENS, LANGUAGE_KEY,
+                        LEGACY_REMEMBER_ENV_VAR,
+                        MAX_RULE_CHARS, MAX_RULE_TYPES,
                         MAX_TOTAL_CHARS, MAX_TYPE_PREFIX_CHARS,
                         MAX_TYPE_TEXT_CHARS, MIN_CONFIGURABLE_RULE_CHARS,
                         MIN_REMEMBER_AGAIN_CALLS, PLUGIN_CONFIG_PATH,
                         REMEMBER_AGAIN_ENV_VAR, RULE_WARN_CHARS, warn)
+from .configfile import config_path_for, read_config_file
 from .frontmatter import parse_remember_again_after
+from .messages import sanitize_language
 from .reinject import sanitize_reinject_budget
 
-# The keys a config file may declare. Anything else is ignored in silence here
-# (the hook must never argue with a file it merely reads); `validate` is where
-# an unknown key is reported, because that is where a human is listening.
-CONFIG_KEYS = ("rule_types", "legacy_type_prefixes", "remember_again_after",
-               "rule_size", "reinject_budget")
 REMEMBER_UNITS = ("tokens", "calls")
-RULE_TYPE_KEYS = ("prefix", "name", "purpose", "remember_again_after")
 RULE_SIZE_KEYS = ("max_chars", "warn_chars")
-
-
-def read_config_file(path):
-    """Parse one config file, or None when there is nothing usable there.
-
-    Opened the way a rule file is (`rules.read_rule_file`): no symlink, regular
-    file only, bounded read. A project's `.claude/rules-by-path/` is repository
-    data, so `config.json` there can be a link to `/etc/shadow` or a gigabyte of
-    JSON, and neither may reach a parser."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        return None  # by far the common case: no config at this layer
-    except OSError as exc:
-        warn(f"cannot open {path}: {exc}")
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            warn(f"{path} is not a regular file; ignored")
-            return None
-        with os.fdopen(fd, encoding="utf-8", errors="replace") as handle:
-            fd = None  # fdopen owns it now
-            text = handle.read(MAX_CONFIG_BYTES + 1)
-    except Exception as exc:
-        warn(f"cannot read {path}: {exc}")
-        return None
-    finally:
-        if fd is not None:
-            os.close(fd)
-    if len(text) > MAX_CONFIG_BYTES:
-        warn(f"{path} is larger than {MAX_CONFIG_BYTES} bytes; ignored")
-        return None
-    try:
-        loaded = json.loads(text)
-    except ValueError as exc:
-        warn(f"{path} is not valid JSON ({exc}); ignored")
-        return None
-    if not isinstance(loaded, dict):
-        warn(f"{path} does not hold a JSON object; ignored")
-        return None
-    return loaded
 
 
 def clean_text(value, label, source):
@@ -232,7 +186,7 @@ def sanitize_rule_size(raw, source, trusted):
             continue
         try:
             value = int(raw[key])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             warn(f"{source}: '{key}' must be a whole number of characters; ignored")
             continue
         ceiling = MAX_TOTAL_CHARS if trusted else MAX_RULE_CHARS
@@ -250,7 +204,11 @@ def sanitize_rule_size(raw, source, trusted):
 
 
 def sanitize_config(raw, source, trusted=True):
-    """One layer, validated and bounded. Unknown keys are dropped here."""
+    """One layer, validated and bounded.
+
+    A key this function does not know is dropped in silence — the hook must
+    never argue with a file it merely reads; `validate` is where an unknown key
+    is reported, because that is where a human is listening."""
     layer = {}
     if not isinstance(raw, dict):
         return layer
@@ -275,18 +233,33 @@ def sanitize_config(raw, source, trusted=True):
         budget = sanitize_reinject_budget(raw.get("reinject_budget"), source)
         if budget is not None:
             layer["reinject_budget"] = budget
+    if LANGUAGE_KEY in raw:
+        chosen = sanitize_language(raw.get(LANGUAGE_KEY), source)
+        if chosen:
+            layer[LANGUAGE_KEY] = chosen
     return layer
 
 
-def config_path_for(scope_dir):
-    return os.path.join(scope_dir, CONFIG_FILE_NAME)
-
-
 def load_layer(path, trusted):
+    """One layer, validated, or {} when there is nothing usable in it.
+
+    The blanket guard is this module's docstring promise made real, and it is
+    load-bearing rather than defensive habit: a layer is data that arrived with
+    a repository, and the hook decides an `enforce: deny` on the way past here.
+    An exception escaping one layer would therefore not merely cost that
+    layer's settings — it would cancel the injection AND the denial, turning an
+    unreadable file into a way to switch the machine owner's own block off.
+    `1e400` is valid JSON, `json` reads it as `float('inf')`, and `int()` of
+    that raises OverflowError: a per-key list of expected exception types will
+    always be one such case behind, so the last word is taken here."""
     raw = read_config_file(path)
     if raw is None:
         return {}
-    return sanitize_config(raw, path, trusted)
+    try:
+        return sanitize_config(raw, path, trusted)
+    except Exception as exc:
+        warn(f"{path}: unusable configuration ({exc}); ignored")
+        return {}
 
 
 def merge_layer(config, layer, source):
@@ -313,7 +286,8 @@ def load_config(scope_dirs=(), trusted_count=0):
     `trusted_count` is how many of the leading entries are the user's own: the
     rest carry a repository's content and are clamped."""
     config = {"rule_types": [], "legacy_type_prefixes": {},
-              "remember_again_after": {}, "rule_size": {}, "sources": {}}
+              "remember_again_after": {}, "rule_size": {},
+              LANGUAGE_KEY: DEFAULT_LANGUAGE, "sources": {}}
     merge_layer(config, load_layer(PLUGIN_CONFIG_PATH, True), PLUGIN_CONFIG_PATH)
     for index, scope_dir in enumerate(scope_dirs):
         path = config_path_for(scope_dir)
@@ -379,3 +353,13 @@ def max_rule_chars(config):
 def warn_rule_chars(config):
     """Where the CLI starts saying a rule is too long to be repeated cheaply."""
     return (config or {}).get("rule_size", {}).get("warn_chars") or RULE_WARN_CHARS
+
+
+def language(config):
+    """The language rule bodies are written in, and the language the hook
+    injects its own text in when it ships a translation of it.
+
+    Always usable: an absent, unreadable or rejected setting leaves the shipped
+    default in place, because no answer here may end with the hook injecting
+    nothing."""
+    return (config or {}).get(LANGUAGE_KEY) or DEFAULT_LANGUAGE

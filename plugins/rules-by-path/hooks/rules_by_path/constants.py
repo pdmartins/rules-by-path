@@ -49,6 +49,7 @@ MAX_ANCESTOR_STEPS = 64
 # remaining rules are simply not consulted for this call.
 MATCH_BUDGET_SECONDS = 2.0
 STATE_MAX_AGE_SECONDS = 14 * 24 * 3600
+STATE_READ_CHUNK_BYTES = 64 * 1024  # one read normally swallows the file
 
 # How far the context may move on before an already-injected rule is repeated.
 # Long-context models drift away from a rule injected hundreds of thousands of
@@ -120,6 +121,39 @@ MAX_TYPE_PREFIX_CHARS = 8
 # an allowlist on purpose — see is_valid_rule_name.
 RULE_NAME_EXTRA_CHARS = "._-"
 
+# The language rules are written in, and the language the text the hook injects
+# around them is emitted in. It is a `config.json` key like any other, so a
+# project may set it and have its own rules come out in its own language.
+#
+# The value reaches the model, and arrives from a layer that came with a cloned
+# repository, so it is bounded and allowlisted the way a glob is: no newline, no
+# colon, no backtick, no angle bracket, and a low ceiling on top of that. What
+# the allowlist buys is that the value cannot forge a delimiter, a header line
+# or a second line — NOT that 32 characters are too few to word an imperative,
+# which they are not, so every place that echoes the value quotes it. Comparison
+# ignores case and reads `_` as `-`, so `pt_br` and `PT-BR` select `pt-BR`, and
+# the value is NFKC-normalized first so `ｅｎ` is `en` (see messages.py).
+LANGUAGE_KEY = "language"
+MAX_LANGUAGE_CHARS = 32
+LANGUAGE_EXTRA_CHARS = " -_()"
+# The alphanumerics that render as nothing at all. `str.isalnum()` is true for
+# Unicode category Lo, and `str.isprintable()` is true for them as well, so the
+# allowlist above admits them on both counts while a reader sees an empty gap —
+# a value that LOOKS like `en` and does not select English. These four are the
+# complete set: no other codepoint is alphanumeric, printable, and invisible,
+# and NFKC folds every wider spelling of them into one of these.
+LANGUAGE_FORBIDDEN_CHARS = "\u115f\u1160\u3164\uffa0"
+# The languages the plugin ships a translation of the injected text in, spelled
+# canonically. An unlisted language is still a legitimate value — the rules
+# themselves are written in it — and only the scaffolding falls back to English.
+DEFAULT_LANGUAGE = "en"
+BRAZILIAN_PORTUGUESE = "pt-BR"
+
+# How the harness labels this plugin's own output. A marker, not prose: every
+# translation of SESSION_NOTICE opens with these exact bytes, and rule content
+# is defanged from emitting them (see FORGED_FRAMING_TOKENS).
+HARNESS_MARKER = "[rules-by-path]"
+
 LEGACY_NOTICE = (
     "This scope still uses the old rules-map.yml format, so NO rules are being "
     "injected from it. Migrate it by running: "
@@ -128,7 +162,7 @@ LEGACY_NOTICE = (
 )
 
 SESSION_NOTICE = (
-    "[rules-by-path] This session has path-scoped rules available. They are "
+    f"{HARNESS_MARKER} This session has path-scoped rules available. They are "
     "markdown files under `.claude/rules-by-path/` (project) and "
     "`~/.claude/rules-by-path/` (global), and they reach you AUTOMATICALLY: the "
     "moment you touch a file whose glob matches, the rule is injected into your "
@@ -139,7 +173,18 @@ SESSION_NOTICE = (
     "or --global — or the rules-by-path:manage skill, which drives it for you."
 )
 
-TRUNCATION_NOTICE = "\n[...rule truncated by the rules-by-path size limit...]"
+# The truncation notice of every shipped language, indexed by language code.
+# The other translated texts live in messages.py; this one lives here, beside
+# FORGED_FRAMING_TOKENS, because that list has to defang EVERY language's
+# variant regardless of which one is active (see the note there) and is built
+# before any configuration has been read. messages.py indexes this mapping, so
+# there is still exactly one copy of each string.
+TRUNCATION_NOTICES = {
+    DEFAULT_LANGUAGE: "\n[...rule truncated by the rules-by-path size limit...]",
+    BRAZILIAN_PORTUGUESE:
+        "\n[...regra truncada pelo limite de tamanho do rules-by-path...]",
+}
+TRUNCATION_NOTICE = TRUNCATION_NOTICES[DEFAULT_LANGUAGE]
 
 # Prefixed onto a rule's body when it is injected because the rule was EDITED
 # mid-session: the dedup key hashes the body, so a changed rule is injected
@@ -178,11 +223,16 @@ RULE_SEPARATOR = "---"
 # harness talking), and the harness's own markers. Impersonating a rule buys
 # the authority of a rule; impersonating Claude Code buys the authority the
 # CLAUDE.md is injected with. Only the second is an escalation.
+#
+# Every shipped truncation notice is listed, not just the active language's:
+# defanging only the variant in force would leave the others usable as forged
+# framing by a rule that guessed which languages exist. A substitution that
+# never matches costs nothing, so the cheap answer is also the safe one.
 FORGED_FRAMING_TOKENS = (
     RULES_OPEN_TAG,
     RULES_CLOSE_TAG,
-    TRUNCATION_NOTICE.strip(),
-    "[rules-by-path]",
+    *(notice.strip() for notice in TRUNCATION_NOTICES.values()),
+    HARNESS_MARKER,
     "<system-reminder",
     "</system-reminder",
     "<function_results",
@@ -192,6 +242,7 @@ FORGED_FRAMING_TOKENS = (
     # Content that emits this claims to be the harness introducing a new block.
     "hook additional context",
 )
+
 
 def warn(message):
     print(f"rules-by-path: {message}", file=sys.stderr)

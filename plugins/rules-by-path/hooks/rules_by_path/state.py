@@ -13,8 +13,8 @@ import tempfile
 import time
 
 from .constants import (DEFAULT_REMEMBER_AGAIN_CALLS, MAX_SESSION_ID_CHARS,
-                        STATE_MAX_AGE_SECONDS, TOKEN_REGRESSION_SLACK,
-                        TRANSCRIPT_TAIL_BYTES, warn)
+                        STATE_MAX_AGE_SECONDS, STATE_READ_CHUNK_BYTES,
+                        TOKEN_REGRESSION_SLACK, TRANSCRIPT_TAIL_BYTES, warn)
 from .discovery import is_safely_owned
 
 
@@ -37,6 +37,7 @@ def lock_exclusive(fd):
         msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
     except Exception as exc:
         warn(f"lock unavailable ({exc}); proceeding without it")
+
 
 def state_dir():
     """Where per-session state lives. Prefers the plugin's own data directory,
@@ -87,6 +88,17 @@ def state_file_for(session_id):
     return os.path.join(directory, (safe_id or "default") + ".json")
 
 
+def coerce_int(value, fallback):
+    """`value` as an int, or `fallback` when it is not a number. Nothing read
+    back from the state file is trusted to still have the type it was written
+    with: a crash mid-write or a hand-edit must cost the dedup, never the
+    injection."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
 def coerce_seen_entry(value):
     """[call number, context tokens or None, reinjections already sent] from
     whatever is on disk, or None when the entry is unusable. Accepts the bare
@@ -98,23 +110,14 @@ def coerce_seen_entry(value):
         return None
     if isinstance(value, int):
         return [value, None, 0]
-    if isinstance(value, list) and value:
-        try:
-            calls = int(value[0])
-        except (TypeError, ValueError):
-            return None
-        tokens = value[1] if len(value) > 1 else None
-        if tokens is not None:
-            try:
-                tokens = int(tokens)
-            except (TypeError, ValueError):
-                tokens = None
-        try:
-            reinjections = int(value[2]) if len(value) > 2 else 0
-        except (TypeError, ValueError):
-            reinjections = 0
-        return [calls, tokens, reinjections]
-    return None
+    if not isinstance(value, list) or not value:
+        return None
+    calls = coerce_int(value[0], None)
+    if calls is None:
+        return None
+    tokens = coerce_int(value[1], None) if len(value) > 1 else None
+    reinjections = coerce_int(value[2], 0) if len(value) > 2 else 0
+    return [calls, tokens, reinjections]
 
 
 def context_size(payload):
@@ -208,7 +211,7 @@ def open_state(state_path):
         os.lseek(fd, 0, os.SEEK_SET)
         raw = b""
         while True:
-            chunk = os.read(fd, 65536)
+            chunk = os.read(fd, STATE_READ_CHUNK_BYTES)
             if not chunk:
                 break
             raw += chunk
@@ -232,10 +235,7 @@ def open_state(state_path):
         # `seen` entry must not crash the arithmetic in main() — that crash
         # aborts the whole injection, taking the user's global rules with it, on
         # every single tool call until the session ends.
-        try:
-            calls = int(data.get("calls") or 0)
-        except (TypeError, ValueError):
-            calls = 0
+        calls = coerce_int(data.get("calls") or 0, 0)
         raw_seen = data.get("seen")
         seen = {}
         if isinstance(raw_seen, dict):
@@ -285,6 +285,7 @@ def cleanup_stale_state():
     except Exception as exc:
         warn(f"state cleanup failed: {exc}")
 
+
 def detect_context_regression(state, current_tokens):
     """Fallback for when SessionStart(compact|clear)'s async reset loses the
     race against the very next PreToolUse: the reset's `--reset-session`
@@ -308,16 +309,11 @@ def detect_context_regression(state, current_tokens):
     seen = state.get("seen")
     if not isinstance(seen, dict):
         return False
-    max_recorded = None
-    for entry_value in seen.values():
-        entry = coerce_seen_entry(entry_value)
-        if entry is None:
-            continue
-        tokens = entry[1]
-        if tokens is not None and (max_recorded is None or tokens > max_recorded):
-            max_recorded = tokens
-    if max_recorded is None:
+    recorded = [entry[1] for entry in map(coerce_seen_entry, seen.values())
+                if entry is not None and entry[1] is not None]
+    if not recorded:
         return False
+    max_recorded = max(recorded)
     if current_tokens + TOKEN_REGRESSION_SLACK < max_recorded:
         warn(f"context tokens dropped from {max_recorded} to {current_tokens}; "
              "compaction/clear likely won the race against the async reset, "

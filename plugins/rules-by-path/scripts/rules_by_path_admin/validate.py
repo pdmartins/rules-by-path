@@ -7,12 +7,15 @@ import os
 import re
 import sys
 
-from .common import (HOOK, LEGACY_INTERVAL_KEY, INTERVAL_KEY, LEGACY_MAP_NAME,
-                     MAX_SCANNED_CHILDREN, MAX_SPLIT_SUGGESTIONS,
-                     MIN_MENTION_CHARS, OWN_KEYS, other_markdown_in, rules_in,
+from .common import (ENFORCE_KEY, HOOK, INTERVAL_KEY, LEGACY_INTERVAL_KEY,
+                     LEGACY_MAP_NAME, OWN_KEYS, other_markdown_in, rules_in,
                      scope_for)
 from .config import TYPE_SEPARATOR, config_for, name_convention, split_type_prefix
 
+# Bounds for the "should this rule be split?" check (CLI only, never the hook).
+MAX_SCANNED_CHILDREN = 200
+MAX_SPLIT_SUGGESTIONS = 3
+MIN_MENTION_CHARS = 4  # below this a name matches prose by accident
 # Case-insensitive: a rule stating a prohibition needs the opposite
 # reinforcement default from one stating a requirement or convention — only
 # prohibition-shaped constraints are known to decay under long context
@@ -132,7 +135,7 @@ def enforce_notes(name, fields, is_global):
     checked out, and letting it deny the user's own tool calls would be an
     escalation. This is where that trust gate is explained to a human, with
     the way around it — a native deny via `enforce --sync` — spelled out."""
-    raw = fields.get("enforce")
+    raw = fields.get(ENFORCE_KEY)
     if raw in (None, [], ""):
         return []
     if isinstance(raw, list):
@@ -186,8 +189,19 @@ def validate_scope(scope_dir, anchor=None, quiet=False, config=None, is_global=F
         if not quiet:
             print("(no rules in this scope — nothing to validate)")
         return 0
+    config = config or {}
     problems = []
     notes = []
+    chosen = HOOK.language(config)
+    if not HOOK.has_translation(chosen):
+        # Not an error: rules are written in whatever language is configured,
+        # and only the plugin's own scaffolding around them needs a translation
+        # a human wrote. Said here so the fallback is never a surprise.
+        notes.append(f"language is {chosen!r}, which the plugin ships no "
+                     f"translation of: rules are written in it, but the text "
+                     f"the hook injects around them stays in "
+                     f"{HOOK.DEFAULT_LANGUAGE} (shipped: "
+                     f"{', '.join(HOOK.SHIPPED_LANGUAGES)})")
     if HOOK.has_legacy_map(scope_dir):
         problems.append(f"a legacy {LEGACY_MAP_NAME} is present and is NOT used; "
                         f"run `migrate` to convert it")
@@ -218,15 +232,17 @@ def validate_scope(scope_dir, anchor=None, quiet=False, config=None, is_global=F
                          f"`{INTERVAL_KEY}:` in 0.4.0. It is still honoured; "
                          f"`migrate` rewrites it")
         notes.extend(split_candidates(name, globs, body, anchor))
-        notes.extend(reinforcement_notes(name, body, fields, config or {}))
+        notes.extend(reinforcement_notes(name, body, fields, config))
         notes.extend(enforce_notes(name, fields, is_global))
-    convention = name_convention(config or {})
-    off_convention = [name for name, _f, _b in rules
-                      if convention and not convention.match(name)]
+    convention = name_convention(config)
+    off_convention = []
+    if convention:
+        off_convention = [name for name, _f, _b in rules
+                          if not convention.match(name)]
     if off_convention:
         notes.append(f"name(s) outside the `TYPE{TYPE_SEPARATOR}what-it-asserts.md` "
                      f"convention: {', '.join(off_convention)} — the type prefix "
-                     f"({'/'.join(HOOK.type_prefixes(config or {}))}) says what "
+                     f"({'/'.join(HOOK.type_prefixes(config))}) says what "
                      f"violating the rule costs, and the rest should assert what "
                      f"the rule requires. These still load; renaming is a "
                      f"curation choice")

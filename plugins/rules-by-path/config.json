@@ -11,8 +11,16 @@
     "(arXiv:2604.20911), so only BUSN defaults to active reinforcement; the",
     "other types default to never and pay reinforcement's cost only when a",
     "rule opts back in. reinject_budget caps how many times ANY rule may be",
-    "re-injected in one session, regardless of type or distance covered."
+    "re-injected in one session, regardless of type or distance covered.",
+    "language is what rule BODIES are written in — the manage skill reads it",
+    "and drafts in that language — and also what the text the hook injects",
+    "around them comes out in, whenever the plugin ships a translation of it",
+    "(en, pt-BR). Any other language is still a fine value: the rules are",
+    "written in it and only that surrounding text falls back to English.",
+    "Rule file names, type prefixes and frontmatter keys never translate."
   ],
+
+  "language": "en",
 
   "rule_types": [
     {

@@ -110,6 +110,29 @@ the block early, nor impersonate the harness (`<system-reminder>`,
   re-injected in a session regardless of how far the context has moved on —
   the first delivery is always free, only the repeats that follow it spend the
   budget, so no rule can reinject for the rest of a very long session.
+- **`language`** (config key, default `en`) is what the manage skill writes rule
+  bodies in — the choice stops being re-decided from the language of each
+  conversation — and also the language of the text the hook injects around them:
+  the session notice, the supersede and truncation notices and the reason an
+  `enforce: deny` gives. Translations ship with the plugin (`en`, `pt-BR`) and
+  are never taken from a config layer, only selected by one: a layer arrives
+  with a cloned repository, and a language it names but the plugin does not
+  ship leaves that surrounding text in English, which `config` and `validate`
+  both report. The project layer wins over the global one, so a rule written
+  inside a repository comes out in that repository's language — except for the
+  `enforce: deny` reason, which speaks for you against the repository being
+  blocked and therefore takes its language from your layers alone. The value is
+  NFKC-normalized and refuses the alphanumerics that render as nothing, so what
+  a human approves in the file is what the code selects. Rule file names, type
+  prefixes and frontmatter keys are identifiers and never translate.
+- **No config layer can take the hook down with it.** `load_layer` now answers
+  any failure while validating a layer with a warning and an empty layer, and
+  the numeric coercions accept `OverflowError` (`1e400` is valid JSON, and
+  `json` reads it as `float('inf')`) as the deep-nesting `RecursionError` is
+  now caught where the document is parsed. This is a security fix, not tidying:
+  the `enforce: deny` decision runs on the same path, so an exception escaping
+  one unreadable file cancelled the machine owner's own block — silently, with
+  exit code 0. The denial is now decided before any config is read at all.
 - **`add` now requires a type**, via `--type` or a name that already carries the
   prefix, and lists the configured types when it is missing. It is the only
   moment in the system when a human is present to judge what violating the rule

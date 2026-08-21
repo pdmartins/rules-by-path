@@ -3,10 +3,8 @@ injection as replacing an earlier, now-stale copy of the same rule that an
 edit left behind in the transcript (rules_by_path.state.pop_superseded_entries
 and the wiring in rules_by_path.main / rules_by_path.context)."""
 
-import json
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -61,46 +59,30 @@ class PopSupersededEntriesTest(unittest.TestCase):
                          "only the two stale editions of THIS rule are gone")
 
 
-class SupersedeNoticeEndToEndTest(unittest.TestCase):
+class SupersedeNoticeEndToEndTest(util.SandboxTestCase):
     """Acceptance case: editing a rule mid-session marks the very next
     delivery as superseding the earlier text, and the stale entry does not
     linger in `seen` afterwards."""
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.proj = os.path.join(self.tmp.name, "proj")
-        os.makedirs(self.home)
-        os.makedirs(os.path.join(self.proj, "src"), exist_ok=True)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def touch(self, session="sup"):
-        return util.injected_text(util.run_hook(util.read_payload(
-            "Read", os.path.join(self.proj, "src", "a.py"), session=session),
-            self.home))
+    PROJECT_SUBDIRS = ("src",)
 
     def state_seen(self, session):
-        path = os.path.join(self.home, ".claude", "cache", "rules-by-path",
-                            f"{session}.json")
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)["seen"]
+        return util.read_state(self.home, session)["seen"]
 
     def test_a_brand_new_rule_carries_no_supersede_notice(self):
         util.write_rule(self.proj, "src.md", "src/**", "VERSION ONE")
-        text = self.touch()
+        text = self.inject()
         self.assertIn("VERSION ONE", text)
         self.assertNotIn(HOOK.SUPERSEDE_NOTICE, text)
 
     def test_editing_the_rule_marks_the_next_injection_as_superseding(self):
         util.write_rule(self.proj, "src.md", "src/**", "VERSION ONE")
-        first = self.touch()
+        first = self.inject()
         self.assertIn("VERSION ONE", first)
-        self.assertIsNone(self.touch(), "unchanged content: not due yet")
+        self.assertIsNone(self.inject(), "unchanged content: not due yet")
 
         util.write_rule(self.proj, "src.md", "src/**", "VERSION TWO body line")
-        second = self.touch()
+        second = self.inject()
         self.assertIn(HOOK.SUPERSEDE_NOTICE, second)
         self.assertIn("VERSION TWO", second)
         self.assertNotIn("VERSION ONE", second, "the old wording is gone entirely")
@@ -108,12 +90,12 @@ class SupersedeNoticeEndToEndTest(unittest.TestCase):
                         "the notice comes before the body it is about")
 
     def test_seen_does_not_accumulate_one_entry_per_edit(self):
-        prefix = os.path.realpath(util.scope_dir(self.proj)) + "::src.md::"
+        prefix = os.path.realpath(self.scope) + "::src.md::"
         util.write_rule(self.proj, "src.md", "src/**", "VERSION ONE")
-        self.touch(session="grow")
+        self.inject(session="grow")
         for version in range(2, 6):
             util.write_rule(self.proj, "src.md", "src/**", f"VERSION {version}")
-            self.touch(session="grow")
+            self.inject(session="grow")
         matching = [key for key in self.state_seen("grow") if key.startswith(prefix)]
         self.assertEqual(len(matching), 1,
                          "only the current edition's entry should remain")
@@ -123,12 +105,12 @@ class SupersedeNoticeEndToEndTest(unittest.TestCase):
         delivery of the version that did the superseding."""
         util.write_rule(self.proj, "src.md", "src/**", "VERSION ONE",
                         extra_frontmatter=["remember_again_after: 1 calls"])
-        self.touch(session="once")
+        self.inject(session="once")
         util.write_rule(self.proj, "src.md", "src/**", "VERSION TWO",
                         extra_frontmatter=["remember_again_after: 1 calls"])
-        supersedes = self.touch(session="once")
+        supersedes = self.inject(session="once")
         self.assertIn(HOOK.SUPERSEDE_NOTICE, supersedes)
-        repeat = self.touch(session="once")
+        repeat = self.inject(session="once")
         self.assertIsNotNone(repeat, "the rule is still due again by call count")
         self.assertNotIn(HOOK.SUPERSEDE_NOTICE, repeat,
                          "this delivery repeats the current version; nothing new "
@@ -138,12 +120,12 @@ class SupersedeNoticeEndToEndTest(unittest.TestCase):
         big_v1 = "V1 " + "x" * (HOOK.MAX_RULE_CHARS + 1_000)
         big_v2 = "V2 " + "y" * (HOOK.MAX_RULE_CHARS + 1_000)
         util.write_rule(self.proj, "big.md", "src/**", big_v1)
-        first = self.touch(session="trunc")
+        first = self.inject(session="trunc")
         self.assertIn("truncated", first)
         self.assertNotIn(HOOK.SUPERSEDE_NOTICE, first)
 
         util.write_rule(self.proj, "big.md", "src/**", big_v2)
-        second = self.touch(session="trunc")
+        second = self.inject(session="trunc")
         self.assertIn(HOOK.SUPERSEDE_NOTICE, second)
         self.assertIn("truncated", second)
         self.assertLess(second.index(HOOK.SUPERSEDE_NOTICE), second.index("V2 "),
