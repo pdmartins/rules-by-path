@@ -5,107 +5,23 @@ import hashlib
 import json
 import os
 import sys
-import time
 
-from .constants import (DEFAULT_LANGUAGE, FILE_PATH_KEYS,
-                        MATCH_BUDGET_SECONDS, MAX_TOTAL_CHARS,
-                        RULES_DIR_RELPATH, WRITE_TOOL_NAMES, warn)
+from .constants import (DEFAULT_LANGUAGE, MAX_TOTAL_CHARS,
+                        WRITE_TOOL_NAMES, warn)
 from .config import (language, load_config, max_rule_chars,
                      remember_again_after_default)
 from .context import build_context, neutralize
 from .messages import (ENFORCE_DENY_REASON_TEMPLATE_KEY, LEGACY_NOTICE_KEY,
                        SESSION_NOTICE_KEY, messages_for)
 from .discovery import find_scopes
-from .frontmatter import enforce_of, globs_of, remember_again_after_of
-from .globbing import glob_matches
+from .frontmatter import enforce_of, remember_again_after_of
+from .matching import (collect_candidates, extract_file_path,
+                       is_inside_rules_dir)
 from .reinject import reinject_budget
-from .rules import has_legacy_map, read_rule_file, scope_index
+from .rules import read_rule_file
 from .state import (cleanup_stale_state, close_state, context_size,
                     detect_context_regression, is_due, open_state,
                     pop_superseded_entries, save_state, state_file_for)
-
-
-def extract_file_path(payload):
-    tool_input = payload.get("tool_input")
-    if not isinstance(tool_input, dict):
-        return None
-    for key in FILE_PATH_KEYS:
-        value = tool_input.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def is_inside_rules_dir(abs_path):
-    """True when the path is inside a rules directory — those files must never
-    trigger injection. Checked on the resolved path too, so an in-repo symlink
-    aliasing the rules directory does not slip past a textual comparison."""
-    needle = f"/{RULES_DIR_RELPATH.replace(os.sep, '/')}/"
-    candidates = (abs_path, os.path.realpath(abs_path).replace(os.sep, "/"))
-    return any(needle in candidate + "/" for candidate in candidates)
-
-
-def path_targets(abs_path, real_abs, base_dir):
-    """[(rel_path, abs_path)] — the paths a glob is matched against.
-
-    The literal path the tool named, plus the resolved one when it still lives
-    inside the same project. Matching only the literal text means the same file
-    reached through a directory symlink does not get the rule that governs it:
-    monorepos routinely carry convenience links (`packages/app/shared ->
-    ../../shared`), and a hostile repo could alias a directory precisely to dodge
-    a rule. The resolved path is dropped when it leaves the project, so a link
-    pointing outside cannot pull in globs from a scope it does not belong to."""
-    if base_dir is None:
-        targets = [(None, abs_path)]
-        if real_abs != abs_path:
-            targets.append((None, real_abs))
-        return targets
-    targets = [(os.path.relpath(abs_path, base_dir).replace(os.sep, "/"), abs_path)]
-    if real_abs != abs_path:
-        rel_real = os.path.relpath(real_abs, os.path.realpath(base_dir))
-        rel_real = rel_real.replace(os.sep, "/")
-        if rel_real != ".." and not rel_real.startswith("../"):
-            targets.append((rel_real, real_abs))
-    return targets
-
-
-def collect_candidates(abs_path, scopes):
-    """(candidates, legacy_scope_labels) for a touched file.
-
-    A candidate is (scope_dir, label, name, glob, fields) — one per matching
-    rule, listing the first glob that matched so provenance stays specific.
-
-    Every scope gets its own slice of the matching budget, and the clock is
-    checked per glob rather than per rule. One scope must not be able to spend
-    another's time: a nested scope is consulted before the repository root, so a
-    shared budget let a vendored directory full of expensive globs starve the
-    root's rules on every single tool call — permanently, since the budget is
-    recomputed per call."""
-    candidates = []
-    legacy = []
-    budget_hit = False
-    real_abs = os.path.realpath(abs_path).replace(os.sep, "/")
-    per_scope = MATCH_BUDGET_SECONDS / max(1, len(scopes))
-    for base_dir, scope_dir, label in scopes:
-        deadline = time.monotonic() + per_scope
-        if has_legacy_map(scope_dir):
-            legacy.append(label)
-        targets = path_targets(abs_path, real_abs, base_dir)
-        for name, fields in scope_index(scope_dir):
-            if time.monotonic() > deadline:
-                budget_hit = True
-                break
-            for glob in globs_of(fields):
-                if time.monotonic() > deadline:
-                    budget_hit = True
-                    break
-                if any(glob_matches(glob, rel, target) for rel, target in targets):
-                    candidates.append((scope_dir, label, name, glob, fields))
-                    break
-    if budget_hit:
-        warn(f"glob matching exceeded its {per_scope:.2f}s per-scope budget; the "
-             f"remaining rules of that scope were skipped for this tool call")
-    return candidates, legacy
 
 
 def config_for_scopes(scopes):
@@ -181,13 +97,17 @@ def enforce_denial(tool_name, scopes, candidates):
 
 def build_blocks(candidates, config, seen, call_number, tokens,
                  default_interval):
-    """The deliveries this tool call should inject, in candidate order.
+    """(deliveries, characters spent) for this tool call, in candidate order.
 
     A candidate is delivered when this session has not seen this exact version
     of it, or when `is_due` says the context has moved far enough since it last
     did. Each delivery is recorded in `seen` as it is appended, so a rule left
     out by the injection budget is retried on the next tool call instead of
     counting as already delivered.
+
+    The characters spent go back to the caller because the rules are not the
+    only thing that can be appended to one injection, and everything appended
+    to it answers to the same ceiling.
     """
     body_limit = max_rule_chars(config)
     budget = reinject_budget(config)
@@ -238,7 +158,7 @@ def build_blocks(candidates, config, seen, call_number, tokens,
         blocks.append({"name": name, "text": text, "truncated": truncated,
                        "superseded": superseded})
         seen[key] = [call_number, tokens, reinjections]
-    return blocks
+    return blocks, total_chars
 
 
 def main():
@@ -295,19 +215,30 @@ def main():
         call_number = state["calls"]
         seen = state["seen"]
 
-        blocks = build_blocks(candidates, config, seen, call_number, tokens,
-                              default_interval)
+        blocks, total_chars = build_blocks(candidates, config, seen,
+                                           call_number, tokens,
+                                           default_interval)
 
         # The legacy notice is told once per scope per session. Repeating it on
         # every tool call would be noise the user cannot silence except by
         # migrating, which is exactly what they may not be ready to do yet.
+        # It rides in the same injection as the rules and answers to the same
+        # ceiling: appended without counting, it was the one block a full
+        # budget could not hold back. Held back, it is not recorded as told, so
+        # the next tool call offers it again.
+        notice = messages[LEGACY_NOTICE_KEY]
         for label in legacy_scopes:
             key = f"legacy::{label}"
             if key in seen:
                 continue
-            blocks.append({"name": "legacy-format",
-                           "text": messages[LEGACY_NOTICE_KEY]})
-            seen[key] = [call_number, tokens]
+            if total_chars + len(notice) > MAX_TOTAL_CHARS:
+                warn(f"injection budget of {MAX_TOTAL_CHARS} chars reached; the "
+                     f"legacy-format notice for {label} was left for the next "
+                     f"tool call")
+                continue
+            total_chars += len(notice)
+            blocks.append({"name": "legacy-format", "text": notice})
+            seen[key] = [call_number, tokens, 0]
 
         if blocks:
             # Emit the injection and flush it BEFORE recording the rules as
@@ -372,8 +303,16 @@ def session_notice():
 def reset_session():
     """SessionStart (source compact|clear) mode: drop the session's state so
     rules are re-injected on the next touch — compaction may have summarized
-    the injected text away, and /clear discards it entirely."""
-    payload = json.load(sys.stdin)
+    the injected text away, and /clear discards it entirely.
+
+    A payload it cannot read leaves nothing to reset, which is not a failure
+    worth reporting: `cli` would otherwise print it as an unexpected error, and
+    a hook whose whole job is to be invisible does not shout on stderr over a
+    session it has no state for."""
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
     state_path = state_file_for(payload.get("session_id"))
     if state_path is None:
         return

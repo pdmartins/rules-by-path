@@ -56,6 +56,7 @@ Layout — one concern per module, none over 400 lines:
     globbing.py     non-backtracking glob matching
     discovery.py    which scopes apply, and which are safe to read
     rules.py        rule names, reading a rule file, indexing a scope
+    matching.py     the touched path, and the rules it matches
     state.py        per-session dedup, context size, repeat scheduling
     context.py      assembling the injected text, defanging forged framing
     main.py         the three entry points Claude Code calls
@@ -119,12 +120,13 @@ from .discovery import (find_scopes, is_safely_owned, scope_is_contained,
                         usable_scope)
 from .rules import (derive_rule_name, has_legacy_map, is_valid_rule_name,
                     read_rule_file, scope_index)
+from .matching import (collect_candidates, extract_file_path,
+                       is_inside_rules_dir, path_targets)
 from .state import (cleanup_stale_state, close_state, coerce_int,
                     coerce_seen_entry, context_size, detect_context_regression,
                     is_due, lock_exclusive, open_state, pop_superseded_entries,
                     save_state, state_dir, state_file_for)
 from .context import build_context, defang, neutralize
-from .main import (build_blocks, cli, collect_candidates, config_for_scopes,
-                   enforce_denial, extract_file_path, is_inside_rules_dir,
-                   main, messages_for_scopes, path_targets, reset_session,
-                   session_notice, trusted_scopes)
+from .main import (build_blocks, cli, config_for_scopes, enforce_denial,
+                   main, messages_for_scopes, reset_session, session_notice,
+                   trusted_scopes)
