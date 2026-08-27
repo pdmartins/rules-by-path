@@ -4,8 +4,8 @@ from forging either."""
 
 from .constants import (DEFAULT_LANGUAGE, FORGED_FRAMING_TOKENS,
                         RULE_SEPARATOR, RULES_CLOSE_TAG, RULES_OPEN_TAG)
-from .messages import (SUPERSEDE_NOTICE_KEY, TRUNCATION_NOTICE_KEY,
-                       messages_for)
+from .messages import (ENFORCE_DENY_REASON_TEMPLATE_KEY, SUPERSEDE_NOTICE_KEY,
+                       TRUNCATION_NOTICE_KEY, messages_for)
 
 # Inserted one character into a marker to break it: visibly identical to the
 # reader, no longer the marker it was impersonating.
@@ -38,6 +38,18 @@ def neutralize(content):
     return "\n".join(
         defanged_separator if line.strip() == RULE_SEPARATOR else line
         for line in content.split("\n"))
+
+
+def build_deny_reason(name, body, messages):
+    """The reason an `enforce: deny` rule reports for the tool call it blocked,
+    with the rule's own text as the WHY a human or model reads.
+
+    Assembled here rather than by the caller so that every path putting rule
+    content in front of the model defangs it in the same one place — the
+    property `build_context` already has, and the reason there is no second
+    place to remember it in."""
+    return messages[ENFORCE_DENY_REASON_TEMPLATE_KEY].format(
+        name=name, body=neutralize(body))
 
 
 def build_context(blocks, messages=None):

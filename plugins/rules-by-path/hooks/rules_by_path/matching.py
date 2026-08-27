@@ -21,13 +21,16 @@ def extract_file_path(payload):
     return None
 
 
-def is_inside_rules_dir(abs_path):
+def is_inside_rules_dir(abs_path, real_abs):
     """True when the path is inside a rules directory — those files must never
     trigger injection. Checked on the resolved path too, so an in-repo symlink
-    aliasing the rules directory does not slip past a textual comparison."""
+    aliasing the rules directory does not slip past a textual comparison.
+
+    `real_abs` is passed in rather than resolved here: `collect_candidates`
+    needs the same value on the same tool call, and resolving a path walks
+    every component of it."""
     needle = f"/{RULES_DIR_RELPATH.replace(os.sep, '/')}/"
-    candidates = (abs_path, os.path.realpath(abs_path).replace(os.sep, "/"))
-    return any(needle in candidate + "/" for candidate in candidates)
+    return any(needle in candidate + "/" for candidate in (abs_path, real_abs))
 
 
 def path_targets(abs_path, real_abs, base_dir):
@@ -63,7 +66,7 @@ def path_targets(abs_path, real_abs, base_dir):
     return targets
 
 
-def collect_candidates(abs_path, scopes):
+def collect_candidates(abs_path, real_abs, scopes):
     """(candidates, legacy_scope_labels) for a touched file.
 
     A candidate is (scope_dir, label, name, glob, fields) — one per matching
@@ -78,7 +81,6 @@ def collect_candidates(abs_path, scopes):
     candidates = []
     legacy = []
     budget_hit = False
-    real_abs = os.path.realpath(abs_path).replace(os.sep, "/")
     per_scope = MATCH_BUDGET_SECONDS / max(1, len(scopes))
     for base_dir, scope_dir, label in scopes:
         deadline = time.monotonic() + per_scope

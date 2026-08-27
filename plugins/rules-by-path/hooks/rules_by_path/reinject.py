@@ -8,7 +8,7 @@ self-contained enough to stand alone — its safe range does not depend on
 which layer sets it, unlike every other numeric setting there."""
 
 from .constants import (MAX_CONFIGURABLE_REINJECT_BUDGET,
-                        MAX_REINJECTIONS_PER_RULE, warn)
+                        MAX_REINJECTIONS_PER_RULE, coerce_int, warn)
 
 
 def sanitize_reinject_budget(raw, source):
@@ -18,9 +18,8 @@ def sanitize_reinject_budget(raw, source):
     number is safe to leave unclamped even for a trusted layer — a session
     repeating one rule without limit is exactly the failure this budget
     exists to prevent."""
-    try:
-        value = int(raw)
-    except (TypeError, ValueError, OverflowError):
+    value = coerce_int(raw, None)
+    if value is None:
         warn(f"{source}: 'reinject_budget' must be a whole number; ignored")
         return None
     clamped = max(0, min(value, MAX_CONFIGURABLE_REINJECT_BUDGET))

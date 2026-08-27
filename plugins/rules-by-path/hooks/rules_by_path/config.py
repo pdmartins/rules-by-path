@@ -27,7 +27,8 @@ from .constants import (DEFAULT_LANGUAGE,
                         MAX_TOTAL_CHARS, MAX_TYPE_PREFIX_CHARS,
                         MAX_TYPE_TEXT_CHARS, MIN_CONFIGURABLE_RULE_CHARS,
                         MIN_REMEMBER_AGAIN_CALLS, PLUGIN_CONFIG_PATH,
-                        REMEMBER_AGAIN_ENV_VAR, RULE_WARN_CHARS, warn)
+                        REMEMBER_AGAIN_ENV_VAR, RULE_WARN_CHARS, coerce_int,
+                        warn)
 from .configfile import config_path_for, read_config_file
 from .frontmatter import parse_remember_again_after
 from .messages import sanitize_language
@@ -184,9 +185,8 @@ def sanitize_rule_size(raw, source, trusted):
     for key in RULE_SIZE_KEYS:
         if key not in raw:
             continue
-        try:
-            value = int(raw[key])
-        except (TypeError, ValueError, OverflowError):
+        value = coerce_int(raw[key], None)
+        if value is None:
             warn(f"{source}: '{key}' must be a whole number of characters; ignored")
             continue
         ceiling = MAX_TOTAL_CHARS if trusted else MAX_RULE_CHARS
@@ -203,6 +203,20 @@ def sanitize_rule_size(raw, source, trusted):
     return sizes or None
 
 
+# The config keys this hook reads, each with the function that bounds it and
+# whether the layer's trust level changes the answer. Every sanitizer answers
+# None for "nothing usable here", so one uniform check covers them all —
+# including `reinject_budget`, whose 0 is a real value.
+LAYER_SANITIZERS = (
+    ("rule_types", sanitize_rule_types, True),
+    ("legacy_type_prefixes", sanitize_legacy_prefixes, False),
+    ("remember_again_after", sanitize_remember_again_after, True),
+    ("rule_size", sanitize_rule_size, True),
+    ("reinject_budget", sanitize_reinject_budget, False),
+    (LANGUAGE_KEY, sanitize_language, False),
+)
+
+
 def sanitize_config(raw, source, trusted=True):
     """One layer, validated and bounded.
 
@@ -212,31 +226,13 @@ def sanitize_config(raw, source, trusted=True):
     layer = {}
     if not isinstance(raw, dict):
         return layer
-    if "rule_types" in raw:
-        types = sanitize_rule_types(raw.get("rule_types"), source, trusted)
-        if types:
-            layer["rule_types"] = types
-    if "legacy_type_prefixes" in raw:
-        mapping = sanitize_legacy_prefixes(raw.get("legacy_type_prefixes"), source)
-        if mapping:
-            layer["legacy_type_prefixes"] = mapping
-    if "remember_again_after" in raw:
-        defaults = sanitize_remember_again_after(
-            raw.get("remember_again_after"), source, trusted)
-        if defaults:
-            layer["remember_again_after"] = defaults
-    if "rule_size" in raw:
-        sizes = sanitize_rule_size(raw.get("rule_size"), source, trusted)
-        if sizes:
-            layer["rule_size"] = sizes
-    if "reinject_budget" in raw:
-        budget = sanitize_reinject_budget(raw.get("reinject_budget"), source)
-        if budget is not None:
-            layer["reinject_budget"] = budget
-    if LANGUAGE_KEY in raw:
-        chosen = sanitize_language(raw.get(LANGUAGE_KEY), source)
-        if chosen:
-            layer[LANGUAGE_KEY] = chosen
+    for key, sanitize, weighs_trust in LAYER_SANITIZERS:
+        if key not in raw:
+            continue
+        value = (sanitize(raw[key], source, trusted) if weighs_trust
+                 else sanitize(raw[key], source))
+        if value is not None:
+            layer[key] = value
     return layer
 
 

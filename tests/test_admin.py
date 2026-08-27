@@ -130,6 +130,23 @@ class AdminTest(util.SandboxTestCase):
         proc = self.admin("which", "--root", self.proj, "--path", "docs/guide.md")
         self.assertIn("no rule covers", proc.stdout)
 
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_which_answers_for_a_symlinked_directory_like_the_hook_does(self):
+        """`which` reports what the injection will do, so it must match a path
+        the way the hook does — including the resolved path, which is how a
+        monorepo's convenience link (`packages/app/shared -> ../../shared`)
+        reaches the rule that governs the real directory. Answering from the
+        literal path alone made this command disagree with the hook it
+        describes."""
+        os.makedirs(os.path.join(self.proj, "real"), exist_ok=True)
+        os.symlink(os.path.join(self.proj, "real"), os.path.join(self.proj, "link"))
+        self.admin("add", "--root", self.proj, "--glob", "real/**",
+                   "--type", "OTHR", stdin="REAL RULE")
+        self.assertIsNotNone(self.inject(rel="link/a.py"),
+                             "the hook injects through the link")
+        proc = self.admin("which", "--root", self.proj, "--path", "link/a.py")
+        self.assertIn("match: rule OTHR_real.md", proc.stdout)
+
     def test_which_outside_root_fails(self):
         proc = self.admin("which", "--root", self.proj, "--path", "/etc/passwd")
         self.assertNotEqual(proc.returncode, 0)

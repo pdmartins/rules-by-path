@@ -48,15 +48,14 @@ def match_path(glob_segments, path_segments):
         segment = glob_segments[g]
         if segment == "**":
             if g == n_glob - 1:
-                for t in range(n_path + 1):
-                    row[t] = t < n_path  # trailing '**' needs at least one segment
+                # A trailing '**' needs at least one segment left to swallow.
+                row = [True] * n_path + [False]
             else:
                 for t in range(n_path, -1, -1):
                     row[t] = prev[t] or (t < n_path and row[t + 1])
         else:
             for t in range(n_path):
                 row[t] = match_segment(segment, path_segments[t]) and prev[t + 1]
-            row[n_path] = False
     return row[0]
 
 

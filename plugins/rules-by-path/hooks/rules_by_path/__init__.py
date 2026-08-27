@@ -116,17 +116,16 @@ from .config import (find_rule_type, language, load_config,
 from .reinject import reinject_budget, sanitize_reinject_budget
 from .globbing import (glob_matches, glob_matches_path, match_path,
                        match_segment)
-from .discovery import (find_scopes, is_safely_owned, scope_is_contained,
-                        usable_scope)
+from .discovery import (find_scopes, global_scope, is_safely_owned,
+                        scope_is_contained, usable_scope)
 from .rules import (derive_rule_name, has_legacy_map, is_valid_rule_name,
                     read_rule_file, scope_index)
 from .matching import (collect_candidates, extract_file_path,
                        is_inside_rules_dir, path_targets)
-from .state import (cleanup_stale_state, close_state, coerce_int,
+from .state import (cleanup_stale_state, close_state,
                     coerce_seen_entry, context_size, detect_context_regression,
                     is_due, lock_exclusive, open_state, pop_superseded_entries,
                     save_state, state_dir, state_file_for)
 from .context import build_context, defang, neutralize
-from .main import (build_blocks, cli, config_for_scopes, enforce_denial,
-                   main, messages_for_scopes, reset_session, session_notice,
-                   trusted_scopes)
+from .main import (build_blocks, cli, config_for_scopes, enforce_denial, main,
+                   messages_for_scopes, reset_session, session_notice)

@@ -12,8 +12,6 @@ import sys
 import tempfile
 
 
-RULES_DIR_RELPATH = os.path.join(".claude", "rules-by-path")
-LEGACY_MAP_NAME = "rules-map.yml"
 # How much of a name or value a refusal message echoes back.
 MAX_ECHOED_NAME_CHARS = 60
 # scripts/rules_by_path_admin/common.py -> the plugin root is three levels up.
@@ -76,6 +74,12 @@ try:
 except AdminError as exc:  # import-time failure: main() is not running yet
     print(f"rules-by-path-admin: {exc}", file=sys.stderr)
     sys.exit(1)
+
+# Taken from the hook rather than re-declared: these two name the directory this
+# tool writes into and the legacy file it migrates away from, and a private copy
+# that drifts means the admin writes rules the hook never reads.
+RULES_DIR_RELPATH = HOOK.RULES_DIR_RELPATH
+LEGACY_MAP_NAME = HOOK.LEGACY_MAP_NAME
 
 
 def scope_for(args):
@@ -185,8 +189,7 @@ def existing_is_not_a_rule(path):
     if not os.path.isfile(path) or os.path.islink(path):
         return False
     try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read(HOOK.MAX_FRONTMATTER_BYTES + 1)
+        text = read_regular_file(path, HOOK.MAX_FRONTMATTER_BYTES + 1)
     except OSError:
         return False
     fields, _ = HOOK.parse_frontmatter(text)

@@ -10,10 +10,9 @@ from .constants import (DEFAULT_LANGUAGE, MAX_TOTAL_CHARS,
                         WRITE_TOOL_NAMES, warn)
 from .config import (language, load_config, max_rule_chars,
                      remember_again_after_default)
-from .context import build_context, neutralize
-from .messages import (ENFORCE_DENY_REASON_TEMPLATE_KEY, LEGACY_NOTICE_KEY,
-                       SESSION_NOTICE_KEY, messages_for)
-from .discovery import find_scopes
+from .context import build_context, build_deny_reason
+from .messages import LEGACY_NOTICE_KEY, SESSION_NOTICE_KEY, messages_for
+from .discovery import find_scopes, global_scope
 from .frontmatter import enforce_of, remember_again_after_of
 from .matching import (collect_candidates, extract_file_path,
                        is_inside_rules_dir)
@@ -30,7 +29,7 @@ def config_for_scopes(scopes):
     The global scope, when there is one, is the first entry and the only
     trusted layer: everything after it is a project scope, whose config arrives
     with whatever repository the touched file belongs to."""
-    trusted_count = 1 if scopes and scopes[0][0] is None else 0
+    trusted_count = 1 if global_scope(scopes) else 0
     return load_config([scope_dir for _base, scope_dir, _label in scopes],
                        trusted_count)
 
@@ -49,18 +48,6 @@ def messages_for_scopes(scopes):
         warn(f"configuration unreadable ({exc}); falling back to "
              f"{DEFAULT_LANGUAGE}")
         return messages_for(DEFAULT_LANGUAGE)
-
-
-def trusted_scopes(scopes):
-    """The scopes whose `config.json` is the machine owner's own — the global
-    one, which `find_scopes` marks by having no base directory.
-
-    Used for the deny reason and nothing else. A project deliberately wins
-    `language` everywhere else, so its rules come out in its own language; the
-    block reason is the one sentence the plugin speaks on the owner's behalf
-    AGAINST a repository, and that repository does not choose the language it
-    is refused in."""
-    return [scope for scope in scopes if scope[0] is None]
 
 
 def enforce_denial(tool_name, scopes, candidates):
@@ -82,9 +69,10 @@ def enforce_denial(tool_name, scopes, candidates):
     way to turn it into an actual native deny for that project."""
     if tool_name not in WRITE_TOOL_NAMES:
         return None
-    if not (scopes and scopes[0][0] is None):
+    owner = global_scope(scopes)
+    if owner is None:
         return None  # no global scope in play this call; nothing to trust
-    trusted_scope = scopes[0][1]
+    trusted_scope = owner[1]
     for scope_dir, _label, name, _glob, fields in candidates:
         if scope_dir != trusted_scope or enforce_of(fields) != "deny":
             continue
@@ -95,24 +83,35 @@ def enforce_denial(tool_name, scopes, candidates):
     return None
 
 
-def build_blocks(candidates, config, seen, call_number, tokens,
-                 default_interval):
-    """(deliveries, characters spent) for this tool call, in candidate order.
+def over_budget(blocks, text, what):
+    """True when `text` would push this injection past its character ceiling.
+
+    The rules are not the only thing appended to one injection, and everything
+    appended to it answers to the same ceiling — so the accounting and the
+    wording live here, once, rather than being restated by each caller. A
+    delivery held back is deliberately NOT recorded in `seen`: the next tool
+    call offers it again."""
+    spent = sum(len(block["text"]) for block in blocks)
+    if spent + len(text) <= MAX_TOTAL_CHARS:
+        return False
+    warn(f"injection budget of {MAX_TOTAL_CHARS} chars reached; {what} left "
+         f"for the next tool call")
+    return True
+
+
+def build_blocks(candidates, config, seen, call_number, tokens):
+    """The deliveries this tool call should inject, in candidate order.
 
     A candidate is delivered when this session has not seen this exact version
     of it, or when `is_due` says the context has moved far enough since it last
     did. Each delivery is recorded in `seen` as it is appended, so a rule left
     out by the injection budget is retried on the next tool call instead of
     counting as already delivered.
-
-    The characters spent go back to the caller because the rules are not the
-    only thing that can be appended to one injection, and everything appended
-    to it answers to the same ceiling.
     """
     body_limit = max_rule_chars(config)
     budget = reinject_budget(config)
+    default_interval = remember_again_after_default(config, tokens is not None)
     blocks = []
-    total_chars = 0
     for scope_dir, _label, name, _glob, fields in candidates:
         result = read_rule_file(scope_dir, name, body_limit)
         if result is None:
@@ -141,11 +140,8 @@ def build_blocks(candidates, config, seen, call_number, tokens,
         else:
             continue
 
-        if total_chars + len(text) > MAX_TOTAL_CHARS:
-            warn(f"injection budget of {MAX_TOTAL_CHARS} chars reached; "
-                 f"rule '{name}' left for the next tool call")
+        if over_budget(blocks, text, f"rule '{name}'"):
             continue
-        total_chars += len(text)
         # A fresh digest with an older entry still on file under the same
         # scope+name means the rule was edited: the stale copy is still
         # sitting in the transcript as a contradictory instruction, so the
@@ -158,7 +154,7 @@ def build_blocks(candidates, config, seen, call_number, tokens,
         blocks.append({"name": name, "text": text, "truncated": truncated,
                        "superseded": superseded})
         seen[key] = [call_number, tokens, reinjections]
-    return blocks, total_chars
+    return blocks
 
 
 def main():
@@ -169,13 +165,16 @@ def main():
     cwd = payload.get("cwd") or os.getcwd()
     abs_path = raw_path if os.path.isabs(raw_path) else os.path.join(cwd, raw_path)
     abs_path = os.path.normpath(abs_path).replace(os.sep, "/")
-    if is_inside_rules_dir(abs_path):
+    # Resolved once for the whole call: resolving a path walks every component
+    # of it, and both checks below need the same answer.
+    real_abs = os.path.realpath(abs_path).replace(os.sep, "/")
+    if is_inside_rules_dir(abs_path, real_abs):
         return
 
     scopes = find_scopes(os.path.dirname(abs_path))
     if not scopes:
         return
-    candidates, legacy_scopes = collect_candidates(abs_path, scopes)
+    candidates, legacy_scopes = collect_candidates(abs_path, real_abs, scopes)
 
     # The denial is decided before any configuration is read, and its wording
     # is then resolved from the trusted layers alone. Both halves are the same
@@ -184,77 +183,76 @@ def main():
     denial = enforce_denial(payload.get("tool_name"), scopes, candidates)
     if denial is not None:
         name, body = denial
-        template = messages_for_scopes(
-            trusted_scopes(scopes))[ENFORCE_DENY_REASON_TEMPLATE_KEY]
+        # A project deliberately wins `language` everywhere else, so its rules
+        # come out in its own language. The block reason is the one sentence the
+        # plugin speaks on the owner's behalf AGAINST a repository, and that
+        # repository does not choose the language it is refused in.
+        owner = global_scope(scopes)
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason":
-                    template.format(name=name, body=neutralize(body)),
+                "permissionDecisionReason": build_deny_reason(
+                    name, body, messages_for_scopes([owner] if owner else [])),
             },
         }))
         return
 
-    # The language is resolved once, here, and travels down by parameter — no
-    # module keeps it.
-    config = config_for_scopes(scopes)
-    messages = messages_for(language(config))
-
-    tokens = context_size(payload)
-    default_interval = remember_again_after_default(config, tokens is not None)
     state_path = state_file_for(payload.get("session_id"))
     state_fd, state = open_state(state_path)
     try:
-        # Catches the compaction/clear the async SessionStart reset lost the
-        # race against: a token count that dropped hard since the last
-        # recorded injection means `seen` still thinks the summarized-away
-        # text is fresh in context. Must run before any dedup decision below.
-        detect_context_regression(state, tokens)
         state["calls"] = state.get("calls", 0) + 1
         call_number = state["calls"]
-        seen = state["seen"]
+        # Nothing this file touches has a rule: the call counter still advances
+        # — it is how `remember_again_after` measures distance in calls — but no
+        # config.json, no transcript and no rule file is read. That is the shape
+        # of most tool calls, and all three used to be paid for regardless.
+        if candidates or legacy_scopes:
+            # The language is resolved once, here, and travels down by
+            # parameter — no module keeps it.
+            config = config_for_scopes(scopes)
+            messages = messages_for(language(config))
+            tokens = context_size(payload)
+            # Catches the compaction/clear the async SessionStart reset lost the
+            # race against: a token count that dropped hard since the last
+            # recorded injection means `seen` still thinks the summarized-away
+            # text is fresh in context. Must run before any dedup decision below.
+            detect_context_regression(state, tokens)
+            seen = state["seen"]
 
-        blocks, total_chars = build_blocks(candidates, config, seen,
-                                           call_number, tokens,
-                                           default_interval)
+            blocks = build_blocks(candidates, config, seen, call_number, tokens)
 
-        # The legacy notice is told once per scope per session. Repeating it on
-        # every tool call would be noise the user cannot silence except by
-        # migrating, which is exactly what they may not be ready to do yet.
-        # It rides in the same injection as the rules and answers to the same
-        # ceiling: appended without counting, it was the one block a full
-        # budget could not hold back. Held back, it is not recorded as told, so
-        # the next tool call offers it again.
-        notice = messages[LEGACY_NOTICE_KEY]
-        for label in legacy_scopes:
-            key = f"legacy::{label}"
-            if key in seen:
-                continue
-            if total_chars + len(notice) > MAX_TOTAL_CHARS:
-                warn(f"injection budget of {MAX_TOTAL_CHARS} chars reached; the "
-                     f"legacy-format notice for {label} was left for the next "
-                     f"tool call")
-                continue
-            total_chars += len(notice)
-            blocks.append({"name": "legacy-format", "text": notice})
-            seen[key] = [call_number, tokens, 0]
+            # The legacy notice is told once per scope per session. Repeating it
+            # on every tool call would be noise the user cannot silence except by
+            # migrating, which is exactly what they may not be ready to do yet.
+            # It rides in the same injection as the rules, so it answers to the
+            # same ceiling.
+            notice = messages[LEGACY_NOTICE_KEY]
+            for label in legacy_scopes:
+                key = f"legacy::{label}"
+                if key in seen:
+                    continue
+                if over_budget(blocks, notice,
+                               f"the legacy-format notice for {label}"):
+                    continue
+                blocks.append({"name": "legacy-format", "text": notice})
+                seen[key] = [call_number, tokens, 0]
 
-        if blocks:
-            # Emit the injection and flush it BEFORE recording the rules as
-            # seen: if the process dies in the window, the worst case is
-            # re-injecting a rule (a harmless duplicate) rather than marking it
-            # delivered when the model never received it. The design prefers a
-            # rare double injection to loss.
-            payload_out = json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "additionalContext": build_context(blocks, messages),
-                },
-                "suppressOutput": True,
-            })
-            sys.stdout.write(payload_out)
-            sys.stdout.flush()
+            if blocks:
+                # Emit the injection and flush it BEFORE recording the rules as
+                # seen: if the process dies in the window, the worst case is
+                # re-injecting a rule (a harmless duplicate) rather than marking
+                # it delivered when the model never received it. The design
+                # prefers a rare double injection to loss.
+                payload_out = json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": build_context(blocks, messages),
+                    },
+                    "suppressOutput": True,
+                })
+                sys.stdout.write(payload_out)
+                sys.stdout.flush()
         save_state(state_fd, state)  # advances the call counter either way
     finally:
         close_state(state_fd)
@@ -264,7 +262,12 @@ def main():
     # early `return` there meant the sweep only ever ran as a side effect of a
     # successful injection, so sessions that never matched a rule left their
     # state files behind forever.
-    cleanup_stale_state()
+    #
+    # Once per session, on the call that finds the counter at 1: the sweep stats
+    # every state file in the directory, and what it collects goes stale on the
+    # order of days. Running it on every tool call spent that on each one.
+    if call_number == 1:
+        cleanup_stale_state()
 
 
 def session_notice():

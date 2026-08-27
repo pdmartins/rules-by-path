@@ -57,6 +57,17 @@ def usable_scope(base_dir, is_global=False):
         return None
     return scope_dir
 
+def global_scope(scopes):
+    """The machine owner's own scope in a `find_scopes` list — it comes first
+    and is marked by having no base directory — or None when this tool call
+    reached none.
+
+    The mark lives here, next to the function that sets it, rather than being
+    re-read from tuple positions by every caller that needs to know which layer
+    it may trust."""
+    return scopes[0] if scopes and scopes[0][0] is None else None
+
+
 def find_scopes(start_dir):
     """[(base_dir_or_None, scope_dir, label)] for a touched file: the global
     scope first, then every project scope from the highest ancestor down to the
@@ -87,10 +98,10 @@ def find_scopes(start_dir):
     seen = set()
     home = os.path.realpath(os.path.expanduser("~"))
 
-    global_scope = usable_scope(home, is_global=True)
-    if global_scope:
-        seen.add(os.path.realpath(global_scope))
-        scopes.append((None, global_scope, "global"))
+    owner_scope = usable_scope(home, is_global=True)
+    if owner_scope:
+        seen.add(os.path.realpath(owner_scope))
+        scopes.append((None, owner_scope, "global"))
 
     chain = []  # project scopes, deepest first
     directory = start_dir
@@ -115,7 +126,7 @@ def find_scopes(start_dir):
              f"the {room - 1} nearest to the file, ignoring the rest")
         # Keep the outermost scope and the ones closest to the touched file;
         # drop the middle of the chain, which is the part nothing depends on.
-        chain = chain[:1] + chain[len(chain) - (room - 1):] if room > 1 else chain[:1]
+        chain = chain[:1] + chain[len(chain) - room + 1:]
     for base_dir, scope_dir in chain:
         scopes.append((base_dir, scope_dir, f"project {base_dir}"))
     return scopes

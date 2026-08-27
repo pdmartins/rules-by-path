@@ -139,7 +139,14 @@ def cmd_which(args):
     looks_like_a_file = "." in os.path.basename(abs_path.rstrip("/"))
     is_dir_query = (os.path.isdir(abs_path) or args.path.endswith("/")
                     or (not os.path.exists(abs_path) and not looks_like_a_file))
-    targets = [(rel_path, abs_posix)]
+    # The paths the hook matches a glob against, from the hook's own function.
+    # This command answers "what will the injection do with this path", so a
+    # second, narrower notion of the path here is a wrong answer: the local copy
+    # left out the resolved path, and reported "no rule covers" for any file
+    # reached through a directory symlink that the hook does inject into.
+    targets = HOOK.path_targets(abs_posix,
+                                os.path.realpath(abs_path).replace(os.sep, "/"),
+                                None if args.use_global else anchor)
     if is_dir_query:
         targets.append((None if rel_path is None else f"{rel_path.rstrip('/')}/__probe__",
                         f"{abs_posix.rstrip('/')}/__probe__"))

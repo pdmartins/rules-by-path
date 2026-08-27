@@ -9,12 +9,12 @@ import json
 import os
 import re
 import stat
-import tempfile
 import time
 
 from .constants import (DEFAULT_REMEMBER_AGAIN_CALLS, MAX_SESSION_ID_CHARS,
                         STATE_MAX_AGE_SECONDS, STATE_READ_CHUNK_BYTES,
-                        TOKEN_REGRESSION_SLACK, TRANSCRIPT_TAIL_BYTES, warn)
+                        TOKEN_REGRESSION_SLACK, TRANSCRIPT_TAIL_BYTES,
+                        coerce_int, warn)
 from .discovery import is_safely_owned
 
 
@@ -39,18 +39,29 @@ def lock_exclusive(fd):
         warn(f"lock unavailable ({exc}); proceeding without it")
 
 
-def state_dir():
-    """Where per-session state lives. Prefers the plugin's own data directory,
-    falls back to ~/.claude/cache, then to a per-uid temp directory."""
-    candidates = []
+def state_dir_candidates():
+    """The directories to try, in order: the plugin's own data directory, then
+    ~/.claude/cache, then a per-uid temp directory.
+
+    A generator so the last one is never built unless the ones before it fail,
+    and `tempfile` is imported inside it for the same reason. That import pulls
+    in `shutil`, `zlib`, `bz2` and `lzma`, and `gettempdir()` probes by creating
+    and unlinking a file — startup the hook was paying on every single tool call
+    to produce a path it almost never reaches."""
     plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
     if plugin_data:
-        candidates.append(os.path.join(plugin_data, "state"))
-    candidates.append(os.path.join(os.path.expanduser("~"), ".claude", "cache",
-                                   "rules-by-path"))
+        yield os.path.join(plugin_data, "state")
+    yield os.path.join(os.path.expanduser("~"), ".claude", "cache",
+                       "rules-by-path")
+    import tempfile
     suffix = f"-{os.getuid()}" if hasattr(os, "getuid") else ""
-    candidates.append(os.path.join(tempfile.gettempdir(), f"rules-by-path-state{suffix}"))
-    for candidate in candidates:
+    yield os.path.join(tempfile.gettempdir(), f"rules-by-path-state{suffix}")
+
+
+def state_dir():
+    """Where per-session state lives — the first candidate that exists, is
+    ours, and is writable."""
+    for candidate in state_dir_candidates():
         try:
             os.makedirs(candidate, mode=0o700, exist_ok=True)
             if os.path.islink(candidate) or not os.path.isdir(candidate):
@@ -86,17 +97,6 @@ def state_file_for(session_id):
         digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
         safe_id = safe_id[:MAX_SESSION_ID_CHARS - len(digest) - 1] + "-" + digest
     return os.path.join(directory, (safe_id or "default") + ".json")
-
-
-def coerce_int(value, fallback):
-    """`value` as an int, or `fallback` when it is not a number. Nothing read
-    back from the state file is trusted to still have the type it was written
-    with: a crash mid-write or a hand-edit must cost the dedup, never the
-    injection."""
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return fallback
 
 
 def coerce_seen_entry(value):
@@ -152,8 +152,10 @@ def context_size(payload):
     except OSError as exc:
         warn(f"transcript not readable ({exc}); counting tool calls instead")
         return None
-    total = None
-    for line in tail.decode("utf-8", "replace").splitlines():
+    # Backwards: the answer is the LAST usable record in the tail, so the first
+    # one found from the end is it — the records before it were parsed in full
+    # only to be overwritten.
+    for line in reversed(tail.decode("utf-8", "replace").splitlines()):
         if '"usage"' not in line:
             continue
         try:
@@ -174,8 +176,8 @@ def context_size(payload):
             if isinstance(value, int) and value > 0:
                 counted += value
         if counted:
-            total = counted
-    return total
+            return counted
+    return None
 
 
 def open_state(state_path):

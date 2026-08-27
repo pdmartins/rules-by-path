@@ -246,3 +246,17 @@ FORGED_FRAMING_TOKENS = (
 
 def warn(message):
     print(f"rules-by-path: {message}", file=sys.stderr)
+
+
+def coerce_int(value, fallback):
+    """`value` as an int, or `fallback` when it is not a number.
+
+    Every number this plugin reads comes from a file it does not control — a
+    state file that may have been hand-edited or half-written, a `config.json`
+    that arrived with a cloned repository. `OverflowError` is the load-bearing
+    member of that triple: `1e400` is valid JSON, `json` reads it as
+    `float('inf')`, and `int()` refuses it."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
