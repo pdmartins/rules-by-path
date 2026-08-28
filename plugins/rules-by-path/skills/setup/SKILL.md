@@ -74,11 +74,12 @@ session transcript; where that cannot be read, it falls back to 25 file-tool
 calls. To change the default globally, add to `~/.claude/settings.json`:
 
 ```json
-"env": { "RULES_BY_PATH_REMEMBER_AFTER": "30k" }
+"env": { "RULES_BY_PATH_REMEMBER_AGAIN_AFTER": "30k" }
 ```
 
 The value takes tokens (`30k`, `1M`), calls (`25 calls`), or `never`. A single
-rule overrides it with `remember_after:` in its frontmatter.
+rule overrides it with `remember_again_after:` in its frontmatter, and
+`config.json` is where the default itself lives (see the README).
 
 ## 4. Recommended hardening (ASK FIRST — edits user settings)
 

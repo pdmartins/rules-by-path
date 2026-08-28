@@ -41,10 +41,12 @@ the block early, nor impersonate the harness (`<system-reminder>`,
   never reminded, while fifty tiny greps burned 20k and were reminded twice.
   Where the transcript cannot be read, the hook falls back to counting file-tool
   calls and reports which unit is in use. There is no conversion between them.
-- **`reinforce:` becomes `remember_after:`**, taking tokens (`30k`, `1M`), calls
-  (`25 calls`) or `never`; `RULES_BY_PATH_REINFORCE_EVERY` becomes
-  `RULES_BY_PATH_REMEMBER_AFTER`. Units may be mixed in one session, so the
-  state records both measures per rule.
+- **`reinforce:` becomes `remember_again_after:`**, taking tokens (`30k`, `1M`),
+  calls (`25 calls`) or `never`; `RULES_BY_PATH_REINFORCE_EVERY` becomes
+  `RULES_BY_PATH_REMEMBER_AGAIN_AFTER`. Units may be mixed in one session, so the
+  state records both measures per rule. The intermediate spelling
+  `remember_after` is still honoured wherever it appears — frontmatter key and
+  environment variable alike — and `migrate` rewrites it in rule files.
 - **A repeat still requires the glob to match again.** Distance covered is
   necessary, not sufficient: a rule governing a folder nobody reopens is never
   repeated.
@@ -68,10 +70,141 @@ the block early, nor impersonate the harness (`<system-reminder>`,
   the name allowlist. Names now join with a single `-`: `src/api/**` derives
   `src-api.md`, not `src--api.md`.
 - **`which` no longer suggests an `add` command** when nothing matches.
-- **`validate` notes rule names outside the `Type_what-it-asserts.md`
-  convention** — `Business_`, `Architecture_` or `Convention_` by what a
-  violation costs, then what the rule asserts. A note, never an error, and only
-  in the CLI: the hook never refuses a rule over its file name.
+- **`validate` notes rule names outside the `TYPE_what-it-asserts.md`
+  convention** — the prefix says what violating the rule costs, the rest asserts
+  what the rule requires. A note, never an error, and only in the CLI: the hook
+  never refuses a rule over its file name.
+- **`validate` compares a rule's own wording against its repeat schedule** — a
+  note when the body reads like a prohibition (`never`, `must not`,
+  `forbidden`, `proibido`...) but `remember_again_after` is `never`, and a note
+  the other way when a rule with no prohibition language repeats tighter than
+  10k tokens / 10 calls. Advice only, and only in the CLI: the hook never reads
+  a rule's own text this way.
+
+### Configuration
+
+- **`config.json`, in three layers.** The rule taxonomy and the repeat defaults
+  moved out of the code and into a file: the plugin ships one, `~/.claude/rules-
+  by-path/config.json` overrides it, and a project's own
+  `.claude/rules-by-path/config.json` overrides that. `rules-by-path config`
+  prints the effective result and names the layer each value came from.
+- **A project layer is untrusted**, because it arrives with whatever repository
+  is checked out: its intervals are clamped to a floor (a repo cannot ask for a
+  repeat on nearly every tool call), its type texts are bounded to one printable
+  line, its prefixes must be ASCII letters and digits, and an unreadable or
+  nonsensical layer is skipped rather than allowed to break injection.
+- **Four rule types by default** — `BUSN` (business rules), `ARCH` (architecture
+  decisions), `CONV` (conventions and definitions), `OTHR` (memory pills) — each
+  with a name, a purpose and its own repeat distance. Any project or user may
+  declare a different taxonomy; nothing else in the plugin carries a second copy
+  of it.
+- **Only `BUSN` defaults to active reinforcement.** Only prohibition-shaped
+  constraints are known to decay under long context (arXiv:2604.20911) —
+  requirements and conventions hold up without being repeated, and every
+  repeat adds one more instruction competing for the model's attention
+  regardless of type (arXiv:2608.02639) — so `ARCH`, `CONV` and `OTHR` ship
+  with `remember_again_after: never`, and a rule opts back into repetition
+  individually when it needs to.
+- **`reinject_budget`** (config key, default 3, clamped to 0-20 in every layer
+  alike, including the user's own) caps how many times ONE rule may be
+  re-injected in a session regardless of how far the context has moved on —
+  the first delivery is always free, only the repeats that follow it spend the
+  budget, so no rule can reinject for the rest of a very long session.
+- **`language`** (config key, default `en`) is what the manage skill writes rule
+  bodies in — the choice stops being re-decided from the language of each
+  conversation — and also the language of the text the hook injects around them:
+  the session notice, the supersede and truncation notices and the reason an
+  `enforce: deny` gives. Translations ship with the plugin (`en`, `pt-BR`) and
+  are never taken from a config layer, only selected by one: a layer arrives
+  with a cloned repository, and a language it names but the plugin does not
+  ship leaves that surrounding text in English, which `config` and `validate`
+  both report. The project layer wins over the global one, so a rule written
+  inside a repository comes out in that repository's language — except for the
+  `enforce: deny` reason, which speaks for you against the repository being
+  blocked and therefore takes its language from your layers alone. The value is
+  NFKC-normalized and refuses the alphanumerics that render as nothing, so what
+  a human approves in the file is what the code selects. Rule file names, type
+  prefixes and frontmatter keys are identifiers and never translate.
+- **No config layer can take the hook down with it.** `load_layer` now answers
+  any failure while validating a layer with a warning and an empty layer, and
+  the numeric coercions accept `OverflowError` (`1e400` is valid JSON, and
+  `json` reads it as `float('inf')`) as the deep-nesting `RecursionError` is
+  now caught where the document is parsed. This is a security fix, not tidying:
+  the `enforce: deny` decision runs on the same path, so an exception escaping
+  one unreadable file cancelled the machine owner's own block — silently, with
+  exit code 0. The denial is now decided before any config is read at all.
+- **`add` now requires a type**, via `--type` or a name that already carries the
+  prefix, and lists the configured types when it is missing. It is the only
+  moment in the system when a human is present to judge what violating the rule
+  would cost.
+- **A type's repeat distance is written into the rule** at `add` time rather
+  than resolved at injection time, so a rule file states its own schedule and
+  the hook never has to know what a type is.
+- **`migrate` became "bring this scope up to the current format"**: it renames
+  pre-0.4.0 type prefixes (`Business_x.md` -> `BUSN_x.md`), rewrites
+  `remember_after:` as `remember_again_after:`, and still converts a legacy
+  `rules-map.yml`. Rules with no type prefix are reported, never guessed at.
+- **The admin CLI is a package**, `scripts/rules_by_path_admin/`, mirroring the
+  hook: one concern per module, none over 400 lines.
+  `scripts/rules-by-path-admin.py` stays as the executable facade that `bin/`
+  and the test suite address by path.
+
+### Enforcement
+
+- **`enforce: deny` on a GLOBAL rule now blocks the write tools it matches**
+  (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`): the tool call is denied with
+  the rule's own (defanged) body as `permissionDecisionReason`. The hook still
+  validates only the PATH, never the rule's content — native
+  `permissions.deny` already blocks by path; what this adds is the rule's own
+  text as the pedagogical reason and not having to hand-author a permission
+  entry. The identical setting on a PROJECT-scope rule is inert: a project
+  scope arrives with whatever repository is checked out, and honouring
+  `enforce:` there would let a cloned repository deny the user's own tool
+  calls.
+- **`enforce --list`/`--sync`** show the native `permissions.deny` entries an
+  `enforce: deny` rule implies and write them into the project's own
+  `.claude/settings.json`, idempotently — the way to turn a project-scope
+  `enforce: deny` (which the hook always ignores) into one that actually
+  blocks. `validate` notes when a project rule needs this.
+
+### Reliability
+
+- **A stale `seen` no longer survives a lost compaction race.**
+  `SessionStart(compact|clear)`'s reset runs asynchronously and can lose the
+  race against the very next `PreToolUse` call, leaving `seen` entries
+  recorded against a much larger context than the one that follows — exactly
+  the moment a rule's text has just been summarized out of the transcript. The
+  hook now compares the current context-token count against the highest one
+  recorded in `seen`; a drop bigger than `TOKEN_REGRESSION_SLACK` (4096 tokens)
+  clears `seen` in place (`calls` survives) and the rule re-injects on that
+  same call, without waiting on the async reset. The async reset is still the
+  primary path; this is only the fallback for when it loses the race.
+- **Editing a rule mid-session now marks the next delivery as superseding the
+  old one.** The dedup key already hashes the body, so an edited rule
+  re-injects on its own — but the earlier wording used to stay in the
+  transcript as a stale, contradictory instruction. The fresh delivery is now
+  prefixed with a one-line notice that it supersedes any earlier occurrence,
+  and the stale entry is dropped from `seen` instead of leaving one dead entry
+  behind per edit for the rest of the session — conflicting duplicate
+  instructions are themselves a driver of long-context collapse
+  (arXiv:2608.02639).
+
+### Docs
+
+- **Two stale claims corrected.** "Design guarantees" no longer cites a
+  nested-`CLAUDE.md` block removed earlier in this cycle, and Troubleshooting
+  no longer says the scope walk "stops at the repo root" — it runs to the
+  filesystem root, as the Scopes section already said.
+- **`/rules-by-path:status` step 5 points at the real state-file locations** —
+  `$CLAUDE_PLUGIN_DATA/state/*.json`, falling back to
+  `~/.claude/cache/rules-by-path/*.json` — instead of a glob that matched
+  neither.
+- **New "vs. native path rules" section** in the README: what Claude Code's
+  own `paths:` rules and nested `CLAUDE.md` already do, the four gaps this
+  plugin closes (Write/Edit/new-file triggers, decay-resistant reinforcement,
+  validation/audit tooling, `enforce: deny` as policy with a pedagogical
+  reason), and an explicit value claim — convention adherence and token
+  economy, not task correctness.
 
 ## 0.2.0
 
