@@ -51,7 +51,9 @@ Four gaps in that native behaviour are what this plugin is actually for:
    the moment a convention is most likely to be broken. This was requested
    upstream and refused: anthropics/claude-code#38487 was closed not-planned.
    The hook here watches all five file tools — `Read`, `Edit`, `Write`,
-   `MultiEdit`, `NotebookEdit` — so creation and editing trigger it too.
+   `MultiEdit`, `NotebookEdit` — so creation and editing trigger it too, and
+   `tool: write` narrows a rule to exactly those (see *Narrowing a rule
+   further*).
 2. **Nothing resends a rule once it fades.** A rule injected hundreds of
    thousands of tokens ago has effectively left a long session's context;
    nothing native repeats it. `remember_again_after` does.
@@ -158,6 +160,49 @@ repository boundary, so a git submodule receives its parent repository's rules.
 Your global rules are budgeted first, so rules arriving with a cloned repo can
 never crowd them out. Project rules are committed with the repo, so the whole
 team shares them.
+
+## Narrowing a rule further
+
+A glob answers *where*. Two more frontmatter keys answer *which paths inside
+it* and *when* — both restrictive, and ANDed with the glob and with each other.
+A rule reaches the model when one `glob` matches, no `exclude` matches, and the
+tool call is of a kind `tool:` accepts.
+
+```markdown
+---
+glob: src/**
+exclude: src/**/*.test.ts
+tool: write
+---
+Every exported function is documented with TSDoc.
+```
+
+- **`exclude:`** takes paths back out of a glob. Same syntax as `glob` (one
+  value or a list), same limits. It says the thing a glob alone cannot:
+  `src/**` *except* the tests, the generated code, the vendored tree.
+- **`tool:`** restricts the rule to `write` calls (Write, Edit, MultiEdit,
+  NotebookEdit) or to `read` ones. `any`, or leaving the key out, means both.
+
+`tool: write` is the one that pays for itself twice. Most conventions govern
+what you *create*, not what you *read* — and a rule spent on a Read is both a
+context cost with no decision attached and, because dedup is per session, a
+rule that may no longer be there when the Write finally happens.
+
+A filter can only ever narrow a rule, so a value the hook cannot read is
+**ignored, not enforced**: `tool: wirte` leaves the rule unfiltered rather than
+silently switching it off. `validate` reports the typo, and refuses outright the
+two shapes that disable a rule without saying so — an `exclude` that takes back
+every path, and one that cancels every glob the rule declares.
+
+`which` explains the outcome for a concrete path:
+
+```
+$ rules-by-path which --root . --path 'src/api/users.test.ts'
+excluded: rule CONV_tsdoc.md — 'src/**' covers this path, exclude: 'src/**/*.test.ts' takes it back
+
+$ rules-by-path which --root . --path 'src/api/users.ts' --tool read
+filtered: rule CONV_tsdoc.md — 'src/**' covers this path, but the rule is tool: write only
+```
 
 ## Repeating a rule
 
@@ -266,6 +311,9 @@ identifiers, not prose, and never translate.
 | `**/deploy/**` | a `deploy/` folder at any depth |
 | `/repos/x/**` | absolute-path prefix (global scope) |
 | `?` | exactly one character; `*` never crosses `/` |
+
+The same syntax reads an `exclude:` entry — it is a glob like any other, only
+matched to take a path back rather than to cover it.
 
 A bare name with no `/` (like `docs` or `Makefile`) is matched two ways: against
 the project-root path (so `docs` covers the root `docs` entry and everything

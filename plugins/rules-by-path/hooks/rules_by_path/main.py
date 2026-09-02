@@ -174,13 +174,15 @@ def main():
     scopes = find_scopes(os.path.dirname(abs_path))
     if not scopes:
         return
-    candidates, legacy_scopes = collect_candidates(abs_path, real_abs, scopes)
+    tool_name = payload.get("tool_name")
+    candidates, legacy_scopes = collect_candidates(abs_path, real_abs, scopes,
+                                                   tool_name)
 
     # The denial is decided before any configuration is read, and its wording
     # is then resolved from the trusted layers alone. Both halves are the same
     # rule: whether the machine owner's block fires, and what it says, may not
     # depend on a file that arrived with the repository being blocked.
-    denial = enforce_denial(payload.get("tool_name"), scopes, candidates)
+    denial = enforce_denial(tool_name, scopes, candidates)
     if denial is not None:
         name, body = denial
         # A project deliberately wins `language` everywhere else, so its rules

@@ -156,9 +156,22 @@ def migrate_interval_key(scope_dir):
         globs = HOOK.globs_of(fields)
         if not globs or not body:
             continue  # `validate` already reports these; rewriting would not help
-        atomic_write(os.path.join(scope_dir, name),
-                     render_rule(globs, body, submitted_interval(fields),
-                                 preserved_fields(fields, owned_last=True)))
+        # Every setting `render_rule` writes from an argument has to be handed
+        # back to it: the filters are in RENDERED_KEYS, so `preserved_fields`
+        # drops them, and a rewrite that did not pass them would silently widen
+        # the rule it was only supposed to retitle a key on.
+        try:
+            rendered = render_rule(globs, body, submitted_interval(fields),
+                                   preserved_fields(fields, owned_last=True),
+                                   excludes=HOOK.excludes_of(fields),
+                                   tool=HOOK.tool_values_of(fields))
+        except AdminError as exc:
+            # A rule this tool would refuse to write today (a filter that
+            # cancels its own glob, say) is one `validate` reports. Renaming a
+            # key in it is not worth aborting the whole migration for.
+            warn(f"skipped {name}: {exc}")
+            continue
+        atomic_write(os.path.join(scope_dir, name), rendered)
         rewritten += 1
         print(f"ok: {name}: {LEGACY_INTERVAL_KEY} -> {INTERVAL_KEY}")
     return rewritten

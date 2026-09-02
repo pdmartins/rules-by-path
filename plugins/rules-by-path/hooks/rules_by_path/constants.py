@@ -17,6 +17,17 @@ FILE_PATH_KEYS = ("file_path", "notebook_path", "path")
 # The only tools `enforce: deny` ever acts on. Read/Grep never write, so an
 # enforce rule has nothing to deny them from doing.
 WRITE_TOOL_NAMES = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+# The two kinds of tool call a rule's `tool:` filter can name. The hook only
+# ever runs for the five file tools, so everything that is not a write is a
+# read — there is no third kind to grow into.
+TOOL_KIND_READ = "read"
+TOOL_KIND_WRITE = "write"
+TOOL_KINDS = (TOOL_KIND_READ, TOOL_KIND_WRITE)
+# Values that say "no restriction" out loud. Recognised so that writing one by
+# hand is not reported as a typo, and so the admin CLI has a word for clearing
+# a filter (`--tool any`) instead of a magic empty string.
+TOOL_KIND_ANY = "any"
+TOOL_ANY_VALUES = (TOOL_KIND_ANY, "all")
 
 # How long a rule may be. Both are defaults: `config.json` may set `rule_size`
 # per user and per project (see config.py). A rule is resent WHOLE every time it
