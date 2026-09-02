@@ -7,9 +7,9 @@ import os
 import re
 import sys
 
-from .common import (ENFORCE_KEY, HOOK, INTERVAL_KEY, LEGACY_INTERVAL_KEY,
-                     LEGACY_MAP_NAME, OWN_KEYS, other_markdown_in, rules_in,
-                     scope_for)
+from .common import (ENFORCE_KEY, EXCLUDE_KEY, HOOK, INTERVAL_KEY,
+                     LEGACY_INTERVAL_KEY, LEGACY_MAP_NAME, OWN_KEYS, TOOL_KEY,
+                     other_markdown_in, rules_in, scope_for)
 from .config import TYPE_SEPARATOR, config_for, name_convention, split_type_prefix
 
 # Bounds for the "should this rule be split?" check (CLI only, never the hook).
@@ -28,6 +28,9 @@ PROHIBITION_PATTERN = re.compile(
 # often a copy-pasted interval than a deliberate choice.
 AGGRESSIVE_INTERVAL_TOKENS = 10_000
 AGGRESSIVE_INTERVAL_CALLS = 10
+# The glob that matches every path: as an `exclude` it is not a filter, it is
+# an off switch, and one nothing in the rule says out loud.
+MATCH_EVERYTHING_GLOB = "**"
 
 
 def glob_base_dir(glob, anchor):
@@ -126,6 +129,43 @@ def effective_interval(name, fields, config):
     return HOOK.parse_remember_again_after(type_default, name) if type_default else None
 
 
+def filter_problems(globs, excludes):
+    """Reasons a rule's own filters mean it can never inject, unprefixed — the
+    caller names the rule, because `render_rule` uses this to refuse to WRITE
+    one of these and has no name to give.
+
+    Both shapes are silent in production: the rule simply never arrives and
+    nothing says why, which is exactly the failure this plugin must not have.
+    Only the two decidable cases are reported — a glob cancelled by an identical
+    exclude, and an exclude that swallows every path. Anything subtler is a
+    judgement, and `which` answers it for a concrete path."""
+    if not excludes:
+        return []
+    if MATCH_EVERYTHING_GLOB in excludes:
+        return [f"{EXCLUDE_KEY}: {MATCH_EVERYTHING_GLOB!r} takes back every "
+                f"path, so the rule can never inject"]
+    if globs and set(globs) <= set(excludes):
+        return [f"every glob it declares is also an {EXCLUDE_KEY}, so the rule "
+                f"can never inject"]
+    return []
+
+
+def filter_notes(name, fields):
+    """Notes about a rule's `tool:` filter: a value the hook does not
+    recognise, and therefore ignores.
+
+    Ignoring it is the deliberate choice — a filter only ever narrows a rule,
+    and a typo in one must not be why a rule silently stops arriving — so this
+    is where the typo is said out loud instead."""
+    known = set(HOOK.TOOL_KINDS) | set(HOOK.TOOL_ANY_VALUES)
+    unknown = [value for value in HOOK.tool_values_of(fields) if value not in known]
+    if not unknown:
+        return []
+    return [f"{name}: {TOOL_KEY}: {', '.join(repr(v) for v in unknown)} "
+            f"not understood — only {'/'.join(HOOK.TOOL_KINDS)} are honoured; "
+            f"ignored, so the rule applies to every tool call it matches"]
+
+
 def enforce_notes(name, fields, is_global):
     """Notes about a rule's `enforce:` setting: a value the hook does not
     recognise, or a `deny` declared somewhere the hook will never honour it.
@@ -143,6 +183,13 @@ def enforce_notes(name, fields, is_global):
     if HOOK.enforce_of(fields) is None:
         return [f"{name}: enforce: {str(raw)[:32]!r} is not understood — only "
                 f"'deny' is honoured; ignored"]
+    if HOOK.tools_of(fields) == (HOOK.TOOL_KIND_READ,):
+        # Both settings are honoured, and together they cancel: `deny` only
+        # ever fires on a write, and this rule has just excused itself from
+        # every write there is.
+        return [f"{name}: enforce: deny on a {TOOL_KEY}: {HOOK.TOOL_KIND_READ} "
+                f"rule never fires — a deny only ever acts on a write, and "
+                f"reads are never denied"]
     if not is_global:
         return [f"{name}: enforce: deny only takes effect from the GLOBAL "
                 f"scope (project rules are untrusted input); the hook ignores "
@@ -212,8 +259,11 @@ def validate_scope(scope_dir, anchor=None, quiet=False, config=None, is_global=F
     total = 0
     for name, fields, body in rules:
         globs = HOOK.globs_of(fields)
+        excludes = HOOK.excludes_of(fields)
         if not globs:
             problems.append(f"{name}: no glob declared, so it can never be injected")
+        problems.extend(f"{name}: {reason}"
+                        for reason in filter_problems(globs, excludes))
         for glob in globs:
             by_glob.setdefault(glob, []).append(name)
         if not body:
@@ -233,6 +283,7 @@ def validate_scope(scope_dir, anchor=None, quiet=False, config=None, is_global=F
                          f"`migrate` rewrites it")
         notes.extend(split_candidates(name, globs, body, anchor))
         notes.extend(reinforcement_notes(name, body, fields, config))
+        notes.extend(filter_notes(name, fields))
         notes.extend(enforce_notes(name, fields, is_global))
     convention = name_convention(config)
     off_convention = []

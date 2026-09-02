@@ -20,9 +20,14 @@ SETTINGS_RELPATH = os.path.join(".claude", "settings.json")
 
 
 def enforce_rules(scope_dir):
-    """[(name, globs)] for every rule in the scope that declares
-    `enforce: deny`, in the order `rules_in` already sorts them."""
-    return [(name, HOOK.globs_of(fields)) for name, fields, _body in rules_in(scope_dir)
+    """[(name, globs, excludes)] for every rule in the scope that declares
+    `enforce: deny`, in the order `rules_in` already sorts them.
+
+    The excludes ride along because a native deny entry cannot express one:
+    `--list` has to say so, rather than let a synced entry silently deny more
+    than the rule it came from."""
+    return [(name, HOOK.globs_of(fields), HOOK.excludes_of(fields))
+            for name, fields, _body in rules_in(scope_dir)
             if HOOK.enforce_of(fields) == "deny"]
 
 
@@ -41,7 +46,7 @@ def deny_entries(rules):
     """The native `permissions.deny` entries these rules translate to,
     deduplicated but order-preserving."""
     entries = []
-    for _name, globs in rules:
+    for _name, globs, _excludes in rules:
         for glob in globs:
             entry = deny_entry_for(glob)
             if entry not in entries:
@@ -101,11 +106,15 @@ def cmd_enforce_list(scope_dir, anchor, is_global):
         return
     settings_path = os.path.join(anchor, SETTINGS_RELPATH)
     existing = set(existing_deny_entries(settings_path))
-    for name, globs in rules:
+    for name, globs, excludes in rules:
         print(f"{name}  enforce: deny")
         if not globs:
             print("  (no glob declared — never matches, so never denies)")
             continue
+        if excludes:
+            print(f"  NOTE: this rule excludes {', '.join(repr(e) for e in excludes)}, "
+                  f"which a native deny entry cannot express — a synced entry "
+                  f"denies those paths too")
         for glob in globs:
             entry = deny_entry_for(glob)
             if is_global:

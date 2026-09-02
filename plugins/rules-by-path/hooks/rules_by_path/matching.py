@@ -4,8 +4,9 @@ import os
 import time
 
 from .constants import (FILE_PATH_KEYS, MATCH_BUDGET_SECONDS,
-                        RULES_DIR_RELPATH, warn)
-from .frontmatter import globs_of
+                        RULES_DIR_RELPATH, TOOL_KIND_READ, TOOL_KIND_WRITE,
+                        WRITE_TOOL_NAMES, warn)
+from .frontmatter import excludes_of, globs_of, tools_of
 from .globbing import glob_matches
 from .rules import has_legacy_map, scope_index
 
@@ -66,11 +67,63 @@ def path_targets(abs_path, real_abs, base_dir):
     return targets
 
 
-def collect_candidates(abs_path, real_abs, scopes):
+def tool_kind(tool_name):
+    """Which kind of tool call this is. The hook only ever runs for the five
+    file tools, so everything that is not a write is a read."""
+    return TOOL_KIND_WRITE if tool_name in WRITE_TOOL_NAMES else TOOL_KIND_READ
+
+
+def tool_allows(fields, kind):
+    """True when a rule's `tool:` filter accepts a tool call of this kind.
+
+    A rule declaring no filter accepts every call, and so does one whose filter
+    could not be read (see `tools_of`). `kind` is None when the caller has no
+    tool call in hand — the admin CLI's `which`, or a payload that somehow
+    arrived without a tool name — and then the filter is reported rather than
+    applied: a rule is never lost to a question nobody asked."""
+    kinds = tools_of(fields)
+    if not kinds or kind is None:
+        return True
+    return kind in kinds
+
+
+def first_matching_glob(globs, targets, deadline=None):
+    """The first glob that matches any target, or None.
+
+    `deadline` is a `time.monotonic()` value: past it the search stops and
+    answers None, which is why every caller re-checks the clock rather than
+    trusting the answer — see `collect_candidates`."""
+    for glob in globs:
+        if deadline is not None and time.monotonic() > deadline:
+            return None
+        if any(glob_matches(glob, rel, target) for rel, target in targets):
+            return glob
+    return None
+
+
+def applied_glob(fields, targets, kind=None, deadline=None):
+    """The glob that makes a rule apply to this tool call, or None.
+
+    Every filter a rule declares is restrictive, and they are ANDed: the call
+    must be of a kind the rule accepts, one `glob` must match, and no `exclude`
+    may. Cheapest first — the tool filter is a tuple lookup, and a rule it
+    rules out never spends any of the matching budget."""
+    if not tool_allows(fields, kind):
+        return None
+    matched = first_matching_glob(globs_of(fields), targets, deadline)
+    if matched is None:
+        return None
+    if first_matching_glob(excludes_of(fields), targets, deadline) is not None:
+        return None
+    return matched
+
+
+def collect_candidates(abs_path, real_abs, scopes, tool_name=None):
     """(candidates, legacy_scope_labels) for a touched file.
 
-    A candidate is (scope_dir, label, name, glob, fields) — one per matching
+    A candidate is (scope_dir, label, name, glob, fields) — one per applying
     rule, listing the first glob that matched so provenance stays specific.
+    Which rules apply is `applied_glob`'s decision, filters included.
 
     Every scope gets its own slice of the matching budget, and the clock is
     checked per glob rather than per rule. One scope must not be able to spend
@@ -81,6 +134,10 @@ def collect_candidates(abs_path, real_abs, scopes):
     candidates = []
     legacy = []
     budget_hit = False
+    # Converted once, here: the rest of the matching reasons in kinds, so a
+    # caller with no tool call in hand (the admin CLI) passes a kind directly
+    # and nothing has to invent a tool name to stand for one.
+    kind = tool_kind(tool_name) if tool_name else None
     per_scope = MATCH_BUDGET_SECONDS / max(1, len(scopes))
     for base_dir, scope_dir, label in scopes:
         deadline = time.monotonic() + per_scope
@@ -91,13 +148,16 @@ def collect_candidates(abs_path, real_abs, scopes):
             if time.monotonic() > deadline:
                 budget_hit = True
                 break
-            for glob in globs_of(fields):
-                if time.monotonic() > deadline:
-                    budget_hit = True
-                    break
-                if any(glob_matches(glob, rel, target) for rel, target in targets):
-                    candidates.append((scope_dir, label, name, glob, fields))
-                    break
+            glob = applied_glob(fields, targets, kind, deadline)
+            if time.monotonic() > deadline:
+                # The clock ran out while this rule was being matched, so the
+                # answer above was reached without consulting every pattern —
+                # an `exclude` may simply never have been read. A half-checked
+                # rule is worse than an unchecked one: drop it and stop.
+                budget_hit = True
+                break
+            if glob is not None:
+                candidates.append((scope_dir, label, name, glob, fields))
     if budget_hit:
         warn(f"glob matching exceeded its {per_scope:.2f}s per-scope budget; the "
              f"remaining rules of that scope were skipped for this tool call")

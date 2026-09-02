@@ -14,9 +14,10 @@ Subcommands:
   init                        create the scope directory
   list                        one line per rule: file <- globs
   show   --rule N             print a rule's full content
-  which  --path P             which rules cover a path (the hook's own matching)
+  which  --path P [--tool T]  which rules cover a path (the hook's own matching)
   add    --glob G [--glob G]  create a rule; markdown body read from stdin
          --type T [--rule N] [--force] [--remember-again-after 30k|25 calls|never]
+         [--exclude G] [--tool read|write]  narrow it past its glob
   update --rule N             replace a rule's body (stdin), keeping its globs
   remove --rule N | --glob G  delete a rule file
   validate                    check every rule: frontmatter, globs, size, safety

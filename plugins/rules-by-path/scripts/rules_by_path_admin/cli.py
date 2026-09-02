@@ -5,7 +5,7 @@ drift apart."""
 import argparse
 import sys
 
-from .common import AdminError, fail
+from .common import HOOK, AdminError, fail
 from .config import cmd_config
 from .enforce import cmd_enforce
 from .migrate import cmd_migrate
@@ -30,6 +30,14 @@ def main():
                        help="global scope (~/.claude/rules-by-path)")
     parser.add_argument("--glob", action="append", default=[],
                         help="glob the rule applies to; repeat for several")
+    parser.add_argument("--exclude", action="append", default=[],
+                        help="glob the rule must NOT apply to, even when a "
+                             "--glob covers it; repeat for several")
+    parser.add_argument("--tool", choices=[*HOOK.TOOL_KINDS, HOOK.TOOL_KIND_ANY],
+                        help="restrict the rule to write tool calls "
+                             "(Write/Edit/MultiEdit/NotebookEdit) or to reads; "
+                             f"'{HOOK.TOOL_KIND_ANY}' clears the restriction. "
+                             "On `which`, asks what fires for that kind of call")
     parser.add_argument("--rule", help="rule file name")
     parser.add_argument("--type", dest="type",
                         help="rule type prefix (see `config` for the configured "
@@ -61,6 +69,13 @@ def main():
             args.glob = args.glob[0]
     if args.command == "which" and not args.path:
         fail("'which' requires --path")
+    # A filter only means something on a file the command actually writes or
+    # resolves. Accepting it silently elsewhere would read as "this rule now
+    # excludes X" when nothing was written at all.
+    if args.command not in ("add", "update", "which"):
+        if args.exclude or args.tool:
+            fail(f"'{args.command}' takes no --exclude/--tool; they belong to "
+                 f"`add`, `update` and `which`")
     if args.command == "enforce":
         if not (args.list or args.sync):
             fail("'enforce' requires --list or --sync")

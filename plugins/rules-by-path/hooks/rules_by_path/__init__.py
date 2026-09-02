@@ -9,9 +9,14 @@ glob it applies to in its own frontmatter:
 
     ---
     glob: src/api/**
+    exclude: src/api/**/*.test.py
+    tool: write
     remember_again_after: 30k
     ---
     Every endpoint must validate its input.
+
+`exclude` and `tool` are optional and restrictive: a rule applies when one glob
+matches, no exclude matches, and the tool call is of a kind `tool` accepts.
 
 Scopes: every `.claude/rules-by-path/` from the touched file's directory up to
 the filesystem root, plus the global scope, `~/.claude/rules-by-path/`.
@@ -94,7 +99,9 @@ from .constants import (ADMIN_COMMAND, BRAZILIAN_PORTUGUESE,
                         RULES_CLOSE_TAG, RULES_DIR_RELPATH, RULES_OPEN_TAG,
                         SESSION_NOTICE, STATE_MAX_AGE_SECONDS,
                         STATE_READ_CHUNK_BYTES, SUPERSEDE_NOTICE,
-                        TOKEN_REGRESSION_SLACK, TRANSCRIPT_TAIL_BYTES,
+                        TOKEN_REGRESSION_SLACK, TOOL_ANY_VALUES, TOOL_KIND_ANY,
+                        TOOL_KIND_READ, TOOL_KIND_WRITE, TOOL_KINDS,
+                        TRANSCRIPT_TAIL_BYTES,
                         TRUNCATION_NOTICE, TRUNCATION_NOTICES,
                         WRITE_TOOL_NAMES, warn)
 from .messages import (ENFORCE_DENY_REASON_TEMPLATE_KEY,
@@ -104,9 +111,11 @@ from .messages import (ENFORCE_DENY_REASON_TEMPLATE_KEY,
                        TRUNCATION_NOTICE_KEY, canonical_language,
                        has_translation, messages_for, normalize_language,
                        sanitize_language)
-from .frontmatter import (enforce_of, globs_of, parse_frontmatter,
-                          parse_remember_again_after, parse_size,
-                          remember_again_after_of, unquote)
+from .frontmatter import (EXCLUDE_KEYS, GLOB_KEYS, TOOL_KEYS, declared_values,
+                          enforce_of, excludes_of, glob_list, globs_of,
+                          parse_frontmatter, parse_remember_again_after,
+                          parse_size, remember_again_after_of, tool_values_of,
+                          tools_of, unquote)
 from .configfile import config_path_for, read_config_file
 from .config import (find_rule_type, language, load_config,
                      load_layer, max_rule_chars,
@@ -120,8 +129,9 @@ from .discovery import (find_scopes, global_scope, is_safely_owned,
                         scope_is_contained, usable_scope)
 from .rules import (derive_rule_name, has_legacy_map, is_valid_rule_name,
                     read_rule_file, scope_index)
-from .matching import (collect_candidates, extract_file_path,
-                       is_inside_rules_dir, path_targets)
+from .matching import (applied_glob, collect_candidates, extract_file_path,
+                       first_matching_glob, is_inside_rules_dir, path_targets,
+                       tool_allows, tool_kind)
 from .state import (cleanup_stale_state, close_state,
                     coerce_seen_entry, context_size, detect_context_regression,
                     is_due, lock_exclusive, open_state, pop_superseded_entries,

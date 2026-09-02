@@ -25,13 +25,12 @@ HOOK_PATH = os.path.join(
 # `remember_again_after` carried until 0.4.0, and keeping both would leave the
 # setting alive under two names forever. `description` and `enforce` are owned
 # too (so `validate` does not report them as unknown keys) but are carried
-# through verbatim, like any key this tool knows nothing about.
+# through verbatim, like any key this tool knows nothing about. The rest of the
+# set is derived from the hook further down, where HOOK exists.
 INTERVAL_KEY = "remember_again_after"
 LEGACY_INTERVAL_KEY = "remember_after"
 DESCRIPTION_KEY = "description"
 ENFORCE_KEY = "enforce"
-RENDERED_KEYS = {"glob", "globs", INTERVAL_KEY, LEGACY_INTERVAL_KEY}
-OWN_KEYS = RENDERED_KEYS | {DESCRIPTION_KEY, ENFORCE_KEY}
 
 
 class AdminError(Exception):
@@ -75,11 +74,18 @@ except AdminError as exc:  # import-time failure: main() is not running yet
     print(f"rules-by-path-admin: {exc}", file=sys.stderr)
     sys.exit(1)
 
-# Taken from the hook rather than re-declared: these two name the directory this
-# tool writes into and the legacy file it migrates away from, and a private copy
-# that drifts means the admin writes rules the hook never reads.
+# Taken from the hook rather than re-declared: these name the directory this
+# tool writes into, the legacy file it migrates away from, and the frontmatter
+# keys carrying a rule's filters. A private copy that drifts means the admin
+# writes rules the hook never reads, or a filter it never applies.
 RULES_DIR_RELPATH = HOOK.RULES_DIR_RELPATH
 LEGACY_MAP_NAME = HOOK.LEGACY_MAP_NAME
+GLOB_KEY = HOOK.GLOB_KEYS[0]
+EXCLUDE_KEY = HOOK.EXCLUDE_KEYS[0]
+TOOL_KEY = HOOK.TOOL_KEYS[0]
+RENDERED_KEYS = ({INTERVAL_KEY, LEGACY_INTERVAL_KEY} | set(HOOK.GLOB_KEYS)
+                 | set(HOOK.EXCLUDE_KEYS) | set(HOOK.TOOL_KEYS))
+OWN_KEYS = RENDERED_KEYS | {DESCRIPTION_KEY, ENFORCE_KEY}
 
 
 def scope_for(args):

@@ -8,6 +8,50 @@ a version at all: `bash publish.sh --local` reinstalls it.
 
 ## Unreleased
 
+**A rule can narrow itself past its glob: `exclude:` and `tool:`.**
+
+```markdown
+---
+glob: src/**
+exclude: src/**/*.test.ts
+tool: write
+---
+Every exported function is documented with TSDoc.
+```
+
+Both are restrictive and ANDed with the glob and with each other: a rule
+reaches the model when one `glob` matches, no `exclude` matches, and the tool
+call is of a kind `tool:` accepts. `exclude:` reads exactly like `glob:` (one
+value or a list, same length and count limits). `tool:` takes `write` (Write,
+Edit, MultiEdit, NotebookEdit), `read`, or `any`.
+
+`tool: write` is the one with a measurable payoff. Most conventions govern what
+gets created, not what gets read — and before this, a Read spent the rule: dedup
+is per session, so the Write that was actually about to break the convention
+could arrive to find the rule already delivered and gone.
+
+A filter only ever narrows a rule, so **a value the hook cannot read is ignored,
+not enforced** — `tool: wirte` leaves the rule unfiltered rather than silently
+switching it off. `validate` reports the typo, and now errors on the two shapes
+that disable a rule without saying so: an `exclude` of `**`, and an `exclude`
+that cancels every glob the rule declares.
+
+Around it:
+
+- `add`/`update` take `--exclude` (repeatable) and `--tool`; `--tool any`
+  clears the restriction. Both filters survive a `show` -> edit -> `update`
+  round trip, and deleting the line from the submitted frontmatter removes the
+  filter.
+- `which` takes `--tool read|write`, marks a restricted match `(write only)`,
+  and — the reason it exists — explains a rule whose glob covers the path but
+  which still will not fire, as `excluded:` or `filtered:`.
+- `enforce --list` warns that a native `permissions.deny` entry cannot express
+  an `exclude`, so a synced entry denies more than the rule does. `validate`
+  reports `enforce: deny` on a `tool: read` rule as inert — a deny only ever
+  acts on a write.
+- `migrate` carries the filters through the rewrite it does of the pre-0.4.0
+  interval key.
+
 **Breaking: the injected text is now the rule bodies and nothing else.**
 
 ```

@@ -4,7 +4,14 @@ Deliberately the only parser in the plugin — the admin CLI imports this one
 rather than carrying a second implementation."""
 
 from .constants import (MAX_GLOB_CHARS, MAX_GLOBS_PER_RULE,
-                        MIN_REMEMBER_AGAIN_TOKENS, warn)
+                        MIN_REMEMBER_AGAIN_TOKENS, TOOL_ANY_VALUES,
+                        TOOL_KINDS, warn)
+
+# The frontmatter keys that carry a rule's filters. Each is accepted in the
+# singular and the plural, because people write both.
+GLOB_KEYS = ("glob", "globs")
+EXCLUDE_KEYS = ("exclude", "excludes")
+TOOL_KEYS = ("tool", "tools")
 
 
 def unquote(value):
@@ -72,32 +79,86 @@ def parse_frontmatter(text, source="rule"):
     return fields, "\n".join(lines[end + 1:])
 
 
-def globs_of(fields):
-    """The globs a rule declares. `glob` may be a single value or a list; the
-    plural `globs` is accepted too, because people will write it."""
-    raw = fields.get("glob")
-    if raw in (None, [], ""):
-        raw = fields.get("globs")
-    if raw in (None, [], ""):
-        return []
-    values = raw if isinstance(raw, list) else [raw]
+def declared_values(fields, keys):
+    """The raw values a rule declares under the first of `keys` that carries
+    any, always as a list. A missing key and an empty one answer the same."""
+    for key in keys:
+        raw = fields.get(key)
+        if raw not in (None, [], ""):
+            return raw if isinstance(raw, list) else [raw]
+    return []
+
+
+def glob_list(fields, keys, label, overflow_consequence):
+    """The globs a rule declares under `keys`, bounded.
+
+    `glob:` and `exclude:` are both lists of globs answering to the same two
+    limits, so they share one reader: a second copy is how one of them
+    silently loses a bound. Only the wording differs, because dropping a glob
+    and dropping an exclude fail in opposite directions — one rule stops
+    reaching a path, the other keeps reaching one it was told to leave alone.
+    """
     globs = []
     dropped = 0
-    for value in values:
+    for value in declared_values(fields, keys):
         value = str(value).strip()
         if not value:
             continue
         if len(value) > MAX_GLOB_CHARS:
-            warn(f"glob longer than {MAX_GLOB_CHARS} chars ignored: {value[:64]!r}...")
+            warn(f"{label} longer than {MAX_GLOB_CHARS} chars ignored: "
+                 f"{value[:64]!r}...")
             continue
         if len(globs) >= MAX_GLOBS_PER_RULE:
             dropped += 1  # kept counting so the warning states how many were lost
             continue
         globs.append(value)
     if dropped:
-        warn(f"more than {MAX_GLOBS_PER_RULE} globs on one rule; {dropped} ignored "
-             f"(these never match — split the rule or remove some globs)")
+        warn(f"more than {MAX_GLOBS_PER_RULE} {label} patterns on one rule; "
+             f"{dropped} ignored ({overflow_consequence})")
     return globs
+
+
+def globs_of(fields):
+    """The globs a rule declares. `glob` may be a single value or a list; the
+    plural `globs` is accepted too, because people will write it."""
+    return glob_list(fields, GLOB_KEYS, "glob",
+                     "these never match — split the rule or remove some globs")
+
+
+def excludes_of(fields):
+    """The globs that take a rule back. A rule applies when one of its `glob`
+    entries matches and NONE of these do — every filter a rule declares is
+    restrictive, and they are ANDed.
+
+    Declared like `glob`: one value or a list, singular or plural key."""
+    return glob_list(fields, EXCLUDE_KEYS, "exclude",
+                     "the rule still injects for the paths they name")
+
+
+def tool_values_of(fields):
+    """Everything a rule's `tool:` key declares, lowercased, in order.
+
+    `tools_of` narrows this to what the hook acts on; `validate` and the admin
+    CLI need the raw list so that a value neither of them recognises is
+    reported and preserved rather than quietly dropped on the next rewrite."""
+    return [str(value).strip().lower()
+            for value in declared_values(fields, TOOL_KEYS)
+            if str(value).strip()]
+
+
+def tools_of(fields):
+    """The tool kinds a rule restricts itself to — a subset of TOOL_KINDS — or
+    () when it declares no restriction at all.
+
+    A value this function does not recognise yields (), exactly like an absent
+    key: a filter can only ever NARROW a rule, so a typo in one must not be the
+    reason a rule silently stops arriving. `validate` reports it instead, where
+    a human is listening. `any`/`all` mean the same thing on purpose, said out
+    loud rather than by omission."""
+    values = tool_values_of(fields)
+    if any(value in TOOL_ANY_VALUES for value in values):
+        return ()
+    return tuple(kind for kind in TOOL_KINDS if kind in values)
 
 
 def parse_size(text):

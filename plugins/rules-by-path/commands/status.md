@@ -36,8 +36,10 @@ an error.
 
 ## 3. Would anything actually fire
 
-`validate` reports rules that can never inject (no glob, empty body), rules over
-the size limits, globs shared by several rules, and a legacy `rules-map.yml`:
+`validate` reports rules that can never inject (no glob, empty body, or an
+`exclude:` that takes back every path its glob covers), rules over the size
+limits, globs shared by several rules, an unreadable `tool:` value, and a legacy
+`rules-map.yml`:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" validate --global
@@ -48,7 +50,10 @@ the size limits, globs shared by several rules, and a legacy `rules-map.yml`:
 
 Use `$ARGUMENTS` when the user named a file or folder, otherwise the current
 directory. This runs the hook's own matcher, so it settles "why is my rule not
-firing?" definitively. Single-quote the path:
+firing?" definitively — including a rule whose glob covers the path but whose
+`exclude:` or `tool:` filter takes it back, reported as `excluded:` or
+`filtered:`. Add `--tool read` or `--tool write` to ask about one kind of tool
+call. Single-quote the path:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --root "$ROOT" --path '<target>'
@@ -101,5 +106,8 @@ not:
 - a rule injects **once per session per version**, so a correctly configured
   rule that was already delivered will not appear again until it changes or the
   context moves on by its `remember_again_after` distance;
+- a rule with `tool: write` is *meant* not to fire on a Read, and one with an
+  `exclude:` is meant not to fire on the paths it names — `which` says which
+  filter took a path back;
 - a scope still holding `rules-map.yml` injects nothing at all until
   `/rules-by-path:setup` migrates it.
