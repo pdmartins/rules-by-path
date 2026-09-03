@@ -13,8 +13,8 @@ import time
 
 from .constants import (DEFAULT_REMEMBER_AGAIN_CALLS, MAX_SESSION_ID_CHARS,
                         STATE_MAX_AGE_SECONDS, STATE_READ_CHUNK_BYTES,
-                        TOKEN_REGRESSION_SLACK, TRANSCRIPT_TAIL_BYTES,
-                        coerce_int, warn)
+                        STATS_FILE_NAME, TOKEN_REGRESSION_SLACK,
+                        TRANSCRIPT_TAIL_BYTES, coerce_int, warn)
 from .discovery import is_safely_owned
 
 
@@ -280,6 +280,8 @@ def cleanup_stale_state():
         cutoff = time.time() - STATE_MAX_AGE_SECONDS
         with os.scandir(directory) as it:
             for entry in it:
+                if entry.name == STATS_FILE_NAME:
+                    continue  # usage outlives sessions by design
                 if entry.is_file() and entry.stat().st_mtime < cutoff:
                     os.unlink(entry.path)
     except FileNotFoundError:

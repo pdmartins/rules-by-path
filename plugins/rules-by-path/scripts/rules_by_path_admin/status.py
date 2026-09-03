@@ -16,6 +16,8 @@ from types import SimpleNamespace
 from .common import HOOK, read_regular_file, rules_in, other_markdown_in
 from .config import cmd_config, config_for, split_type_prefix
 from .rules import filters_label
+from .usage import (public_usage, usage_label, usage_notes, usage_of,
+                    usage_since)
 from .validate import scope_findings
 from .which import coverage_of, no_coverage_line
 
@@ -35,7 +37,9 @@ LINE_HOOK_OK = "hook: {path} (present)"
 LINE_HOOK_MISSING = "hook: {path} MISSING — nothing can be injected; reinstall the plugin"
 LINE_SCOPE = "\n{label}  {directory}  — {count} rule(s)"
 LINE_SCOPE_ABSENT = "\n{label}  {directory}  — not created yet (the first `add` creates it)"
-LINE_RULE = "  {name}  <-  {globs}{filters}  ({chars} chars{repeat})"
+LINE_RULE = "  {name}  <-  {globs}{filters}  ({chars} chars{repeat}{usage})"
+LINE_USAGE_SINCE = "usage stats since {since} ({path})"
+LINE_USAGE_NONE = "usage stats: nothing recorded yet ({path})"
 LINE_NOT_RULES = "  (not rules, no frontmatter: {names})"
 LINE_NOTE = "  note: {text}"
 LINE_PROBLEM = "  ERROR: {text}"
@@ -72,7 +76,7 @@ def environment_report():
     }
 
 
-def rule_entry(name, fields, body, config):
+def rule_entry(name, fields, body, config, usage):
     prefix, _rest = split_type_prefix(name, config)
     interval = HOOK.remember_again_after_of(fields)
     raw_interval = fields.get("remember_again_after")
@@ -88,21 +92,26 @@ def rule_entry(name, fields, body, config):
         "remember_again_after_parsed": list(interval) if interval else None,
         "enforce": HOOK.enforce_of(fields),
         "chars": len(body),
+        "usage": public_usage(usage),
         "_fields": fields,
+        "_usage": usage,
     }
 
 
-def scope_report(label, scope_dir, anchor, config, is_global):
+def scope_report(label, scope_dir, anchor, config, is_global, stats):
     report = {"scope": label, "directory": scope_dir,
               "exists": os.path.isdir(scope_dir), "rules": [], "not_rules": [],
               "legacy_map": False, "notes": [], "problems": []}
     if not report["exists"]:
         return report
     for name, fields, body in rules_in(scope_dir, HOOK.max_rule_chars(config)):
-        report["rules"].append(rule_entry(name, fields, body, config))
+        report["rules"].append(rule_entry(name, fields, body, config,
+                                          usage_of(stats, scope_dir, name)))
     report["not_rules"] = other_markdown_in(scope_dir)
     report["legacy_map"] = HOOK.has_legacy_map(scope_dir)
     notes, problems, _count = scope_findings(scope_dir, anchor, config, is_global)
+    notes.extend(usage_notes(stats, scope_dir,
+                             [(rule["name"], rule["globs"]) for rule in report["rules"]]))
     report["notes"], report["problems"] = notes, problems
     return report
 
@@ -168,13 +177,15 @@ def repeat_report():
 
 def collect(args):
     report = environment_report()
+    stats = HOOK.load_stats()
+    report["usage"] = {"since": usage_since(stats), "path": HOOK.stats_path()}
     report["scopes"] = []
     coverage = {"path": args.path, "by_scope": {}} if args.path else None
     for label, target in scope_targets(args):
         scope_dir, anchor = scope_dir_and_anchor(target)
         config = config_for(target)
         report["scopes"].append(scope_report(label, scope_dir, anchor, config,
-                                             target.use_global))
+                                             target.use_global, stats))
         if coverage is not None:
             entries, shown = coverage_of(scope_dir, anchor, target.use_global,
                                          args.path, args.tool)
@@ -199,9 +210,11 @@ def print_scope(scope):
     for rule in scope["rules"]:
         globs = ", ".join(rule["globs"]) if rule["globs"] else "(NO GLOB — never injected)"
         repeat = f", repeat {rule['remember_again_after']}" if rule["remember_again_after"] else ""
+        label = usage_label(rule["_usage"])
         print(LINE_RULE.format(name=rule["name"], globs=globs,
                                filters=filters_label(rule["_fields"]),
-                               chars=rule["chars"], repeat=repeat))
+                               chars=rule["chars"], repeat=repeat,
+                               usage=f"; {label}" if label else ""))
     if scope["not_rules"]:
         print(LINE_NOT_RULES.format(names=", ".join(scope["not_rules"])))
     for note in scope["notes"]:
@@ -215,6 +228,8 @@ def print_report(report, args):
     print(LINE_PYTHON.format(**report["python"]))
     hook = report["hook"]
     print((LINE_HOOK_OK if hook["present"] else LINE_HOOK_MISSING).format(path=hook["path"]))
+    usage = report["usage"]
+    print((LINE_USAGE_SINCE if usage["since"] else LINE_USAGE_NONE).format(**usage))
     for scope in report["scopes"]:
         print_scope(scope)
     coverage = report["coverage"]

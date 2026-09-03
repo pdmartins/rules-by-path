@@ -21,6 +21,7 @@ from .rules import read_rule_file
 from .state import (cleanup_stale_state, close_state, context_size,
                     detect_context_regression, is_due, open_state,
                     pop_superseded_entries, save_state, state_file_for)
+from .stats import record_injections
 
 
 def config_for_scopes(scopes):
@@ -112,7 +113,7 @@ def build_blocks(candidates, config, seen, call_number, tokens):
     budget = reinject_budget(config)
     default_interval = remember_again_after_default(config, tokens is not None)
     blocks = []
-    for scope_dir, _label, name, _glob, fields in candidates:
+    for scope_dir, _label, name, glob, fields in candidates:
         result = read_rule_file(scope_dir, name, body_limit)
         if result is None:
             continue
@@ -152,7 +153,8 @@ def build_blocks(candidates, config, seen, call_number, tokens):
         superseded = last_seen is None and pop_superseded_entries(
             seen, scope_dir, name, digest)
         blocks.append({"name": name, "text": text, "truncated": truncated,
-                       "superseded": superseded})
+                       "superseded": superseded, "scope_dir": scope_dir,
+                       "glob": glob, "repeat": reinjections > 0})
         seen[key] = [call_number, tokens, reinjections]
     return blocks
 
@@ -202,6 +204,7 @@ def main():
 
     state_path = state_file_for(payload.get("session_id"))
     state_fd, state = open_state(state_path)
+    blocks = []
     try:
         state["calls"] = state.get("calls", 0) + 1
         call_number = state["calls"]
@@ -258,6 +261,15 @@ def main():
         save_state(state_fd, state)  # advances the call counter either way
     finally:
         close_state(state_fd)
+    if blocks:
+        # Usage is recorded after the injection is delivered and the session
+        # state released: it is bookkeeping, and bookkeeping never gets to
+        # delay or lose a delivery.
+        base_dirs = {scope_dir: base_dir for base_dir, scope_dir, _label in scopes}
+        record_injections(payload.get("session_id"), [
+            (block["scope_dir"], base_dirs.get(block["scope_dir"]),
+             block["name"], block["glob"], block["repeat"])
+            for block in blocks if "scope_dir" in block], abs_path)
     # Best-effort maintenance, kept off the critical path: it runs after the
     # payload is delivered so a slow directory sweep can never delay or drop it.
     # It must be reached on the far more common no-injection path too — an

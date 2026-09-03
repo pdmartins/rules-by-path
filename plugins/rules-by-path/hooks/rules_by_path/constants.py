@@ -60,6 +60,15 @@ MAX_ANCESTOR_STEPS = 64
 # remaining rules are simply not consulted for this call.
 MATCH_BUDGET_SECONDS = 2.0
 STATE_MAX_AGE_SECONDS = 14 * 24 * 3600
+# Per-rule usage lives beside the session state, in one file that the stale
+# sweep never touches: it is the record that outlives sessions on purpose.
+# Every collection in it is capped so it stays a few KB however long it lives.
+STATS_FILE_NAME = "usage-stats.json"
+STATS_READ_LIMIT_BYTES = 4 * 1024 * 1024
+MAX_STATS_RULES = 512
+MAX_STATS_DIRS_PER_RULE = 20
+MAX_STATS_GLOBS_PER_RULE = 16
+MAX_STATS_RECENT_SESSIONS = 16
 STATE_READ_CHUNK_BYTES = 64 * 1024  # one read normally swallows the file
 
 # How far the context may move on before an already-injected rule is repeated.
