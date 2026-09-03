@@ -25,6 +25,7 @@ Subcommands:
   migrate                     bring a scope up to the current format
   enforce --list              enforce: deny rules and their native deny equivalents
   enforce --sync              write those equivalents into a project's settings.json
+  status [--path P] [--json]  environment, both scopes, findings, coverage, config
 
 Scope: --root <project-root> (project) or --global (~/.claude).
 """

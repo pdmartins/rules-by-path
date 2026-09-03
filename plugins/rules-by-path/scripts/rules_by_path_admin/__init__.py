@@ -10,7 +10,9 @@ Layout — one concern per module, none over 400 lines:
     common.py    the scope, the rule-file vocabulary, safe read and write
     config.py    config.json: which layers apply, the rule taxonomy, `config`
     validate.py  everything that can be said about a scope without changing it
-    rules.py     init, list, show, which, add, update, remove
+    rules.py     init, list, show, add, update, remove
+    which.py     which — what covers a path, by the hook's own matcher
+    status.py    status — the whole picture in one read-only call
     migrate.py   bringing a scope up to the current format
     enforce.py   enforce: deny rules <-> permissions.deny in settings.json
     cli.py       argument parsing and dispatch

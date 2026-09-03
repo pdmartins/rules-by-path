@@ -10,15 +10,17 @@ from .config import cmd_config
 from .enforce import cmd_enforce
 from .migrate import cmd_migrate
 from .rules import (cmd_add, cmd_init, cmd_list, cmd_remove, cmd_show,
-                    cmd_update, cmd_which)
+                    cmd_update)
+from .status import cmd_status
 from .validate import cmd_validate
+from .which import cmd_which
 
 # Declaration order is what `--help` and the "invalid choice" error list.
 COMMANDS = {"init": cmd_init, "list": cmd_list, "show": cmd_show,
             "which": cmd_which, "add": cmd_add, "update": cmd_update,
             "remove": cmd_remove, "validate": cmd_validate,
             "config": cmd_config, "migrate": cmd_migrate,
-            "enforce": cmd_enforce}
+            "enforce": cmd_enforce, "status": cmd_status}
 
 
 def main():
@@ -47,7 +49,10 @@ def main():
                              "sent again: '30k' (tokens), '25 calls', or 'never'. "
                              "Defaults to what the rule's type declares")
     parser.add_argument("--force", action="store_true", help="overwrite an existing rule")
-    parser.add_argument("--path", help="file/folder to resolve (which)")
+    parser.add_argument("--path", help="file/folder to resolve (which; optional "
+                                       "on status)")
+    parser.add_argument("--json", action="store_true",
+                        help="status: print the report as JSON")
     parser.add_argument("--list", action="store_true",
                         help="enforce: show enforce: deny rules and their native "
                              "deny equivalents")
@@ -72,10 +77,14 @@ def main():
     # A filter only means something on a file the command actually writes or
     # resolves. Accepting it silently elsewhere would read as "this rule now
     # excludes X" when nothing was written at all.
-    if args.command not in ("add", "update", "which"):
+    if args.command not in ("add", "update", "which", "status"):
         if args.exclude or args.tool:
             fail(f"'{args.command}' takes no --exclude/--tool; they belong to "
                  f"`add`, `update` and `which`")
+    if args.command == "status" and args.exclude:
+        fail("'status' takes no --exclude")
+    if args.json and args.command != "status":
+        fail(f"'{args.command}' takes no --json; it belongs to `status`")
     if args.command == "enforce":
         if not (args.list or args.sync):
             fail("'enforce' requires --list or --sync")

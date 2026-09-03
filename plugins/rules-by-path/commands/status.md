@@ -1,113 +1,19 @@
 ---
-description: Health check and inventory for rules-by-path — whether the hook can run, which scopes exist, and which rules cover a path
+description: Inventory and health check for rules-by-path — environment, both scopes with their findings, which rules cover a path, the configuration in force
 argument-hint: "[file or folder to check]"
 allowed-tools: ["Bash"]
 ---
 
-# rules-by-path — status
-
-Read-only diagnosis. Do not edit settings or rules here: if something needs
-fixing, point the user at `/rules-by-path:setup` (installation, hardening,
-migration) or at the `rules-by-path:manage` skill (authoring rules).
-
-Run the checks below, then report **one short block** — a list of findings, not
-a transcript of commands.
-
-## 1. Can the plugin run at all?
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" --help >/dev/null 2>&1 \
-  && echo "launcher: ok" \
-  || echo "launcher: FAILED (no working python3/python/py on PATH — nothing can be injected)"
-```
-
-## 2. Which scopes exist, and what is in them
-
-The project scope is anchored at the repository root, not the cwd:
+Run this one command and relay its output as a short list of findings, in the
+order printed. Read-only: rules are authored with the `rules-by-path:manage`
+skill, and problems are fixed with the `rules-by-path:doctor` skill.
 
 ```bash
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" list --global
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" list --root "$ROOT"
+"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" status --root "$ROOT" ${ARGUMENTS:+--path "$ARGUMENTS"}
 ```
 
-`(no rules in this scope)` means the directory does not exist yet — normal, not
-an error.
-
-## 3. Would anything actually fire
-
-`validate` reports rules that can never inject (no glob, empty body, or an
-`exclude:` that takes back every path its glob covers), rules over the size
-limits, globs shared by several rules, an unreadable `tool:` value, and a legacy
-`rules-map.yml`:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" validate --global
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" validate --root "$ROOT"
-```
-
-## 4. What covers this path
-
-Use `$ARGUMENTS` when the user named a file or folder, otherwise the current
-directory. This runs the hook's own matcher, so it settles "why is my rule not
-firing?" definitively — including a rule whose glob covers the path but whose
-`exclude:` or `tool:` filter takes it back, reported as `excluded:` or
-`filtered:`. Add `--tool read` or `--tool write` to ask about one kind of tool
-call. Single-quote the path:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --root "$ROOT" --path '<target>'
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" which --global --path '<target>'
-```
-
-## 5. The configuration in force
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/rules-by-path" config --root "$ROOT"
-```
-
-It prints the rule types, the repeat defaults and the size limits, and names the
-layer each came from — the plugin's own `config.json`, the user's, or the
-project's. An environment variable still beats every layer:
-
-```bash
-echo "RULES_BY_PATH_REMEMBER_AGAIN_AFTER=${RULES_BY_PATH_REMEMBER_AGAIN_AFTER:-unset (config applies)}"
-```
-
-The unit actually in use depends on whether the hook can read the session
-transcript: with it, the distance is measured in context tokens; without it, in
-file-tool calls. The most recent state file records which one was used —
-`"seen"` entries hold `[call number, context tokens, reinjections already
-sent]`, a `null` in the second slot means the token count was unavailable, and
-the third slot counts against the plugin's `reinject_budget` (default 3,
-first delivery not counted) — once it reaches the budget, the rule stops
-repeating for the rest of the session even though it still matches:
-
-State lives in `$CLAUDE_PLUGIN_DATA/state/` for a plugin install, falling back
-to `~/.claude/cache/rules-by-path/` (no `state/` subfolder there) when that
-variable is unset:
-
-```bash
-ls -t ${CLAUDE_PLUGIN_DATA:+"$CLAUDE_PLUGIN_DATA/state"/*.json} \
-      "$HOME/.claude/cache/rules-by-path"/*.json \
-  2>/dev/null | head -1 | xargs -r head -c 400
-```
-
-## Report
-
-In this order: launcher ok or broken; rule count per scope; anything `validate`
-flagged; which rules cover the queried path (or that none do); the effective
-config and which layer it came from; the repeat distance and the unit it is
-being measured in.
-
-Two things worth saying when they apply, because they look like bugs and are
-not:
-
-- a rule injects **once per session per version**, so a correctly configured
-  rule that was already delivered will not appear again until it changes or the
-  context moves on by its `remember_again_after` distance;
-- a rule with `tool: write` is *meant* not to fire on a Read, and one with an
-  `exclude:` is meant not to fire on the paths it names — `which` says which
-  filter took a path back;
-- a scope still holding `rules-map.yml` injects nothing at all until
-  `/rules-by-path:setup` migrates it.
+Two things that look like bugs and are not: a rule injects once per session
+per version, so a rule already delivered stays silent until its repeat distance
+is covered; and Bash access (`cat`, `sed`) never triggers injection — only the
+five file tools do.
