@@ -13,6 +13,8 @@ Layout — one concern per module, none over 400 lines:
     rules.py     init, list, show, add, update, remove
     which.py     which — what covers a path, by the hook's own matcher
     status.py    status — the whole picture in one read-only call
+    doctor.py    doctor — setup checks, --fix, --uninstall
+    hardening.py the recommended permissions.deny entries: check, apply, remove
     migrate.py   bringing a scope up to the current format
     enforce.py   enforce: deny rules <-> permissions.deny in settings.json
     cli.py       argument parsing and dispatch

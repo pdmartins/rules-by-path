@@ -26,6 +26,7 @@ Subcommands:
   enforce --list              enforce: deny rules and their native deny equivalents
   enforce --sync              write those equivalents into a project's settings.json
   status [--path P] [--json]  environment, both scopes, findings, coverage, config
+  doctor [--fix|--uninstall]  setup checks, each finding naming its fix
 
 Scope: --root <project-root> (project) or --global (~/.claude).
 """

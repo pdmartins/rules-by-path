@@ -7,6 +7,7 @@ import sys
 
 from .common import HOOK, AdminError, fail
 from .config import cmd_config
+from .doctor import cmd_doctor
 from .enforce import cmd_enforce
 from .migrate import cmd_migrate
 from .rules import (cmd_add, cmd_init, cmd_list, cmd_remove, cmd_show,
@@ -20,7 +21,8 @@ COMMANDS = {"init": cmd_init, "list": cmd_list, "show": cmd_show,
             "which": cmd_which, "add": cmd_add, "update": cmd_update,
             "remove": cmd_remove, "validate": cmd_validate,
             "config": cmd_config, "migrate": cmd_migrate,
-            "enforce": cmd_enforce, "status": cmd_status}
+            "enforce": cmd_enforce, "status": cmd_status,
+            "doctor": cmd_doctor}
 
 
 def main():
@@ -53,6 +55,12 @@ def main():
                                        "on status)")
     parser.add_argument("--json", action="store_true",
                         help="status: print the report as JSON")
+    parser.add_argument("--fix", action="store_true",
+                        help="doctor: apply the deterministic fixes (migration, "
+                             "hardening) and re-check")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="doctor: remove the deny entries and cached state "
+                             "the plugin left behind; rule directories are kept")
     parser.add_argument("--list", action="store_true",
                         help="enforce: show enforce: deny rules and their native "
                              "deny equivalents")
@@ -85,6 +93,10 @@ def main():
         fail("'status' takes no --exclude")
     if args.json and args.command != "status":
         fail(f"'{args.command}' takes no --json; it belongs to `status`")
+    if (args.fix or args.uninstall) and args.command != "doctor":
+        fail(f"'{args.command}' takes no --fix/--uninstall; they belong to `doctor`")
+    if args.fix and args.uninstall:
+        fail("'doctor' takes --fix OR --uninstall, not both")
     if args.command == "enforce":
         if not (args.list or args.sync):
             fail("'enforce' requires --list or --sync")
