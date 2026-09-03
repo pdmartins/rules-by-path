@@ -10,6 +10,7 @@ from .config import cmd_config
 from .doctor import cmd_doctor
 from .enforce import cmd_enforce
 from .migrate import cmd_migrate
+from .move import ANCHOR_CHOICES, cmd_move
 from .rules import (cmd_add, cmd_init, cmd_list, cmd_remove, cmd_show,
                     cmd_update)
 from .status import cmd_status
@@ -22,7 +23,7 @@ COMMANDS = {"init": cmd_init, "list": cmd_list, "show": cmd_show,
             "remove": cmd_remove, "validate": cmd_validate,
             "config": cmd_config, "migrate": cmd_migrate,
             "enforce": cmd_enforce, "status": cmd_status,
-            "doctor": cmd_doctor}
+            "doctor": cmd_doctor, "move": cmd_move}
 
 
 def main():
@@ -55,6 +56,14 @@ def main():
                                        "on status)")
     parser.add_argument("--json", action="store_true",
                         help="status: print the report as JSON")
+    parser.add_argument("--to-global", dest="to_global", action="store_true",
+                        help="move: destination is the global scope")
+    parser.add_argument("--to-root", dest="to_root",
+                        help="move: destination is this project root")
+    parser.add_argument("--anchor", choices=list(ANCHOR_CHOICES),
+                        help="move --to-global: what a root-anchored glob "
+                             "should mean there — in any project (**/glob) or "
+                             "only in this one (absolute path)")
     parser.add_argument("--fix", action="store_true",
                         help="doctor: apply the deterministic fixes (migration, "
                              "hardening) and re-check")
@@ -82,6 +91,16 @@ def main():
             args.glob = args.glob[0]
     if args.command == "which" and not args.path:
         fail("'which' requires --path")
+    if args.command == "move":
+        if not args.rule:
+            fail("'move' requires --rule")
+        if bool(args.to_global) == bool(args.to_root):
+            fail("'move' requires --to-global OR --to-root <project-root>")
+        if args.anchor and not args.to_global:
+            fail("--anchor only means something with --to-global")
+    elif args.to_global or args.to_root or args.anchor:
+        fail(f"'{args.command}' takes no --to-global/--to-root/--anchor; they "
+             f"belong to `move`")
     # A filter only means something on a file the command actually writes or
     # resolves. Accepting it silently elsewhere would read as "this rule now
     # excludes X" when nothing was written at all.

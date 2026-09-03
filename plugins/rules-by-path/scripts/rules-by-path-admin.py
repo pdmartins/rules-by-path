@@ -20,6 +20,8 @@ Subcommands:
          [--exclude G] [--tool read|write]  narrow it past its glob
   update --rule N             replace a rule's body (stdin), keeping its globs
   remove --rule N | --glob G  delete a rule file
+  move   --rule N --to-global [--anchor any-project|this-project] | --to-root R
+                              carry a rule to the other scope, rewriting its globs
   validate                    check every rule: frontmatter, globs, size, safety
   config                      the effective config.json: rule types and defaults
   migrate                     bring a scope up to the current format

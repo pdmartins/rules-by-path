@@ -16,6 +16,7 @@ Layout — one concern per module, none over 400 lines:
     doctor.py    doctor — setup checks, --fix, --uninstall
     hardening.py the recommended permissions.deny entries: check, apply, remove
     migrate.py   bringing a scope up to the current format
+    move.py      carrying a rule between scopes, globs rewritten
     enforce.py   enforce: deny rules <-> permissions.deny in settings.json
     cli.py       argument parsing and dispatch
 
