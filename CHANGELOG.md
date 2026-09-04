@@ -1,17 +1,7 @@
 # Changelog
 
-Versions are `MAJOR.MINOR.REVISION` and change only on a release — that is,
-only when `develop` is merged into `main` by `publish.sh`. Between releases the
-version in `develop` is the last published one, and `0.0.0` means never
-published. To run the current working tree on your own machine you do not need
-a version at all: `bash publish.sh --local` reinstalls it.
-
-Each version opens with a two-line summary and then the
-[Keep a Changelog](https://keepachangelog.com/en/2.0.0/) categories that have
-something in them — Added, Changed, Deprecated, Removed, Fixed, Security — in
-that order. `**Breaking:**` marks an entry that requires action on upgrade.
-Entries are written while the work is done, under `## Unreleased`; the release
-renames that heading to the version it computes.
+All notable changes to this project are documented here, newest first.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/2.0.0/).
 
 ## Unreleased
 
@@ -66,11 +56,12 @@ skills that shrink to what needs judgement.
   0.5.0 all shipped past.
 - **This file follows [Keep a Changelog](https://keepachangelog.com/en/2.0.0/)**
   — a summary of at most two lines, then the categories that have something in
-  them, headings dated — and the sections for 0.3.0, 0.4.0 and 0.5.0 were
-  reconstructed from the release commits, which the old warning had let ship
-  with nothing but an ever-growing `## Unreleased`. A project rule
-  (`CONV_changelog-follows-keep-a-changelog.md`) carries the format from here
-  on.
+  them, headings dated. Every version was converted, and the sections for 0.3.0,
+  0.4.0 and 0.5.0 were reconstructed from the release commits, which the old
+  warning had let ship with nothing but an ever-growing `## Unreleased`. How to
+  write an entry is no longer explained in the file itself: a project rule
+  (`CONV_changelog-follows-keep-a-changelog.md`) says it where it is needed,
+  which is when someone is editing this file.
 
 ## 0.5.0 — 2026-09-02
 
@@ -344,26 +335,25 @@ being measured in context tokens instead of tool calls.
 
 ## 0.2.0 — 2026-08-17
 
-Packaging, no behaviour change. The plugin became one directory,
-`plugins/rules-by-path/`, so everything Claude Code installs lives under it and
-everything outside it (the test suite, `publish.sh`) is development scaffolding
-that never ships. A release now installs from GitHub; `publish.sh --local`
-installs the working tree, and returns to the branch it started on even when a
-step fails.
+Packaging, no behaviour change: the plugin became one directory, and a release
+started installing from GitHub.
+
+### Changed
+
+- **The plugin is one directory**, `plugins/rules-by-path/`, so everything
+  Claude Code installs lives under it and everything outside it (the test
+  suite, `publish.sh`) is development scaffolding that never ships.
+- **A release installs from GitHub**; `publish.sh --local` installs the working
+  tree, and returns to the branch it started on even when a step fails.
 
 ## 0.1.0 — 2026-08-17
 
-First release, on `main` but not yet public: the repository stays private while
-the plugin is used and validated in real work. `1.0.0` is the version that goes
-out when it does.
+First release, on `main` but not yet public: a personal hook and skill turned
+into a distributable plugin. `1.0.0` is the version that goes out when it does.
 
-Everything below is what that release contains. `rules-by-path` started as
-a personal hook + skill and was converted into a distributable Claude Code
-plugin, then put through several rounds of multi-agent security review before
-publication. Every guarantee below is covered by a test in `tests/` —
-`tests/test_security.py` holds one regression per issue those reviews found.
+### Added
 
-### What it does
+**What it does**
 
 - **One file per rule.** A rule is a markdown file in `.claude/rules-by-path/`
   declaring its glob in frontmatter — no index file, so nothing can fall out of
@@ -373,10 +363,11 @@ publication. Every guarantee below is covered by a test in `tests/` —
   Read/Edit/Write/MultiEdit/NotebookEdit, once per rule version per session.
   Editing a rule re-injects it immediately.
 - **Reinforcement** — after the full injection, a rule is repeated as a
-  one-line reminder every N file-tool calls (default 25, `RULES_BY_PATH_REINFORCE_EVERY`
-  or per-rule `reinforce:`; `never` opts out). A rule injected hundreds of
-  thousands of tokens ago has faded, and a long-context session never compacts,
-  so it never gets the SessionStart reset either.
+  one-line reminder every N file-tool calls (default 25,
+  `RULES_BY_PATH_REINFORCE_EVERY` or per-rule `reinforce:`; `never` opts out).
+  A rule injected hundreds of thousands of tokens ago has faded, and a
+  long-context session never compacts, so it never gets the SessionStart reset
+  either.
 - **`SessionStart` hooks** — on `compact|clear`, resets the per-session dedup
   state so rules survive compaction and `/clear`. On any session start, states
   once that the rules directory is managed by the plugin and names the CLI, so
@@ -395,11 +386,56 @@ publication. Every guarantee below is covered by a test in `tests/` —
   launcher runs, what each scope holds, what `validate` flags, and which rules
   cover a given path.
 
-### Security properties
+**Reliability**
+
+- Rules are independent files, so no command rewrites a shared index and a
+  broken rule never hides the others. Writes are atomic.
+- `migrate` never loses text: it validates and renders every entry before
+  writing any, refuses to overwrite a markdown file that is not a rule (even
+  with `--force`), and skips a legacy rule that would not fit under the size
+  cap rather than converting a cut copy and deleting the original.
+- A file reached through a directory symlink gets the same rules as the file
+  itself, so a monorepo alias neither loses a rule nor borrows one from
+  outside the project.
+- `show` reads a rule that is not valid UTF-8 instead of failing — under the
+  recommended hardening it is the only way to read one — and no command exits
+  with a traceback.
+- Globs containing `#`, quotes, backslashes or non-ASCII characters round-trip
+  intact.
+- `validate` reports rules that can never fire, empty rules, long rules, globs
+  shared by several rules, and a total that exceeds one injection's budget.
+- **Split suggestions.** A rule hands its whole text to every file its glob
+  matches, so `add`, `update`, `migrate` and `validate` flag a rule whose own
+  text names a file or folder living under its glob — "controllers do X, the DI
+  file does Y, nothing over 300 lines" on `src/Api/**` is three rules, and each
+  file should receive only the ones that change what you do to it. The check
+  runs in the CLI, never in the injection path, and only reports names that
+  exist on disk; the manage skill carries the judgement half.
+- Dedup state prefers `${CLAUDE_PLUGIN_DATA}`, falls back to `~/.claude/cache`
+  and then a per-uid temp directory, and warns rather than silently
+  re-injecting on every call.
+- State files expire after 14 days, and the sweep runs on every invocation —
+  including the far more common ones that inject nothing, which is how a
+  machine that rarely matches a rule used to accumulate one file per session.
+
+**Portability**
+
+- Standard library only, Python 3.8+. No YAML dependency at all.
+- `bin/` launchers resolve `python3`, `python` or the Windows `py` launcher —
+  including the POSIX scripts, which are what git-bash runs on Windows — and
+  each candidate has to execute a trivial program before it is used, so a
+  Microsoft Store alias stub named `python3` is skipped rather than trusted.
+  They work when installed via a symlink on `PATH`.
+- POSIX and Windows file locking. Tested on Linux and macOS; Windows support is
+  implemented but not yet verified by the author.
+
+### Security
 
 Rule content is trusted at the level of a repository's `CLAUDE.md` — cloning a
 repo means trusting its rules. What the plugin enforces mechanically is that a
-rule can only inject *its own text*:
+rule can only inject *its own text*. Every guarantee below is covered by a test
+in `tests/`, and `tests/test_security.py` holds one regression per issue the
+pre-publication review rounds found.
 
 - **Containment** — a scope directory must physically live inside the root it
   claims (so a symlinked `.claude` or `.claude/rules-by-path` cannot redirect
@@ -437,46 +473,3 @@ rule can only inject *its own text*:
 - **Fair budget** — global rules are budgeted first and repository-root rules
   second, so rules arriving inside a cloned repo — at any nesting depth —
   cannot crowd out your own guardrails.
-
-### Reliability
-
-- Rules are independent files, so no command rewrites a shared index and a
-  broken rule never hides the others. Writes are atomic.
-- `migrate` never loses text: it validates and renders every entry before
-  writing any, refuses to overwrite a markdown file that is not a rule (even
-  with `--force`), and skips a legacy rule that would not fit under the size
-  cap rather than converting a cut copy and deleting the original.
-- A file reached through a directory symlink gets the same rules as the file
-  itself, so a monorepo alias neither loses a rule nor borrows one from
-  outside the project.
-- `show` reads a rule that is not valid UTF-8 instead of failing — under the
-  recommended hardening it is the only way to read one — and no command exits
-  with a traceback.
-- Globs containing `#`, quotes, backslashes or non-ASCII characters round-trip
-  intact.
-- `validate` reports rules that can never fire, empty rules, long rules, globs
-  shared by several rules, and a total that exceeds one injection's budget.
-- **Split suggestions.** A rule hands its whole text to every file its glob
-  matches, so `add`, `update`, `migrate` and `validate` flag a rule whose own
-  text names a file or folder living under its glob — "controllers do X, the DI
-  file does Y, nothing over 300 lines" on `src/Api/**` is three rules, and each
-  file should receive only the ones that change what you do to it. The check
-  runs in the CLI, never in the injection path, and only reports names that
-  exist on disk; the manage skill carries the judgement half.
-- Dedup state prefers `${CLAUDE_PLUGIN_DATA}`, falls back to `~/.claude/cache`
-  and then a per-uid temp directory, and warns rather than silently
-  re-injecting on every call.
-- State files expire after 14 days, and the sweep runs on every invocation —
-  including the far more common ones that inject nothing, which is how a
-  machine that rarely matches a rule used to accumulate one file per session.
-
-### Portability
-
-- Standard library only, Python 3.8+. No YAML dependency at all.
-- `bin/` launchers resolve `python3`, `python` or the Windows `py` launcher —
-  including the POSIX scripts, which are what git-bash runs on Windows — and
-  each candidate has to execute a trivial program before it is used, so a
-  Microsoft Store alias stub named `python3` is skipped rather than trusted.
-  They work when installed via a symlink on `PATH`.
-- POSIX and Windows file locking. Tested on Linux and macOS; Windows support is
-  implemented but not yet verified by the author.
