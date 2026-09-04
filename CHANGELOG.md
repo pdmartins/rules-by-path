@@ -41,8 +41,9 @@ a version at all: `bash publish.sh --local` reinstalls it.
   the anchor of a glob going global — are asked as options to pick instead of
   prose, and the type options are built from what `config` prints, so a
   replaced taxonomy travels into the question. Splitting a paste asks for every
-  fragment's type in one round. More than four types, or nobody to answer (a
-  `-p` run, a subagent), falls back to prose and to the CLI's own refusal.
+  fragment's type in one round, and so does `doctor`'s untyped-rule finding.
+  More than four types, or nobody to answer (a `-p` run, a subagent), falls
+  back to prose and to the CLI's own refusal.
 
 **A rule can narrow itself past its glob: `exclude:` and `tool:`.**
 

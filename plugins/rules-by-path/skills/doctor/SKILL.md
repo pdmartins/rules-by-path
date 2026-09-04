@@ -23,6 +23,9 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
   constrains the file tools, not subprocesses. Show what changed.
 - A finding marked `[manual]` needs a decision only the user can make (a
   rule's type, an unreadable file). Bring it to them with the command named.
+  A type is asked with options built from what `config --root "$ROOT"` prints,
+  one question per untyped rule and up to four in a round — the mechanics and
+  the fallbacks are in the manage skill's *Asking the user*.
 - "Rule not firing?" — `status --root "$ROOT" --path '<file>'` runs the
   hook's own matcher on that path and says which rule covers it, or which
   filter took it back.
