@@ -8,6 +8,36 @@ a version at all: `bash publish.sh --local` reinstalls it.
 
 ## Unreleased
 
+**One deterministic command per job; the skills shrink to what needs judgement.**
+
+- `status` — environment, both scopes with their rules and findings, what
+  covers a path (`--path`), the configuration in force, the repeat unit in
+  use, and per-rule usage; `--json` for machine consumers. The `status`
+  command is now one line instead of nine commands for the model to run.
+- `doctor` — every setup check in one call (Python, hook launcher, hook and
+  session-notice smoke tests, each scope's format, the recommended hardening,
+  pre-plugin leftovers, cached state), each finding naming its fix.
+  `doctor --fix` applies migration and hardening; `doctor --uninstall`
+  removes deny entries and cached state and keeps rule directories. Replaces
+  the `setup` skill; the new `doctor` skill is a page.
+- **Usage stats.** The hook records, per rule and across sessions,
+  injections, repeats, distinct sessions, first/last date, the directories
+  matched and the glob that matched — bounded, fail-open, off the critical
+  path, exempt from the stale-state sweep. `status` derives two notes: never
+  injected since stats began, and always injected under one subfolder of a
+  wider glob (with the narrower glob to use).
+- `move` — carries a rule between scopes and rewrites its globs for the new
+  frame; the one ambiguous shape (a root-anchored glob going global) asks for
+  `--anchor any-project|this-project`. Type checked against the destination
+  taxonomy; language and `enforce: deny` differences warned about.
+- `digest` and the `improve` skill — harvest sources (CLAUDE.md files,
+  native rules with their `paths:`) and the user's own turns from this
+  project's recent sessions, paired with the rules injected in each; the
+  skill proposes prune/narrow/split/harvest/reword/new-rule changes with
+  evidence and the exact command, and applies only what the user picks.
+- `manage` skill: 491 lines down to 125; the reference material lives in
+  `references/` and is read on demand.
+
 **A rule can narrow itself past its glob: `exclude:` and `tool:`.**
 
 ```markdown
