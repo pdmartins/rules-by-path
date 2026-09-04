@@ -8,6 +8,9 @@
 # published. There are no `-beta` suffixes: a pre-release suffix would only
 # exist to make `claude plugin update` notice a change, and `--local` below
 # solves that properly by reinstalling instead of comparing version strings.
+# The CHANGELOG follows the same policy: entries are written under
+# `## Unreleased` while developing, and a release renames that heading to the
+# number it just computed, dated. This script refuses to release an empty one.
 #
 # WHERE THE LOCAL INSTALL COMES FROM. The mode decides, and the script repoints
 # the marketplace accordingly: a release installs from GitHub — exactly what it
@@ -74,6 +77,7 @@ cd "$REPO_DIR"
 PLUGIN_DIR="$REPO_DIR/plugins/rules-by-path"
 PLUGIN_JSON="$PLUGIN_DIR/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="$REPO_DIR/.claude-plugin/marketplace.json"
+CHANGELOG_MD="$REPO_DIR/CHANGELOG.md"
 
 read_json() { python3 -c "import json,sys; print(json.load(open('$1'))$2)"; }
 
@@ -220,6 +224,22 @@ PYEOF
 [ "$MARKETPLACE_VERSION" = "$CURRENT_VERSION" ] || \
   error "version mismatch: plugin.json says $CURRENT_VERSION, marketplace.json says $MARKETPLACE_VERSION"
 
+# The release notes are the one thing this script cannot compute, so they are
+# checked while the release can still be called off: once main is pushed, a
+# release that says nothing about itself is permanent.
+CHANGELOG_PROBLEM=$(python3 - <<PYEOF
+import io, re
+text = io.open("$CHANGELOG_MD", encoding="utf-8").read()
+section = re.search(r"^## Unreleased[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+if section is None:
+    print("there is no '## Unreleased' heading")
+elif not section.group(1).strip():
+    print("the '## Unreleased' section is empty")
+PYEOF
+)
+[ -z "$CHANGELOG_PROBLEM" ] || \
+  error "CHANGELOG.md: $CHANGELOG_PROBLEM — write what this release changes under that heading first, the release renames it to the new version."
+
 info "Running the test suite..."
 TEST_OUT=$(python3 -m unittest discover -s tests -q 2>&1) || {
   echo "$TEST_OUT" | tail -25
@@ -251,6 +271,7 @@ echo ""
 
 if $DRY_RUN; then
   dry "bump $CURRENT_VERSION → $NEW_VERSION in plugin.json and marketplace.json"
+  dry "rename CHANGELOG.md's '## Unreleased' to '## $NEW_VERSION — $(date +%F)', empty one above"
   dry "git commit -am 'release: v$NEW_VERSION' && git push origin $CURRENT_BRANCH"
   dry "git checkout $RELEASE_BRANCH  (created from $CURRENT_BRANCH if absent)"
   dry "git merge --no-ff $CURRENT_BRANCH -m 'release: v$NEW_VERSION'"
@@ -274,7 +295,7 @@ fi
 
 # ─── bump, commit, merge, push ────────────────────────────────────────────────
 RBP_NEW_VERSION="$NEW_VERSION" RBP_PLUGIN_NAME="$PLUGIN_NAME" python3 - <<PYEOF
-import json, os
+import datetime, json, os, re
 
 version = os.environ["RBP_NEW_VERSION"]
 plugin_name = os.environ["RBP_PLUGIN_NAME"]
@@ -295,10 +316,27 @@ def set_marketplace_version(data):
         if plugin.get("name") == plugin_name:
             plugin["version"] = version
 
+def release_changelog(path):
+    """`## Unreleased` becomes the number computed above, and a fresh empty
+    `## Unreleased` takes its place for the next cycle. It happens here, with
+    the manifests and inside their commit, because this is the first moment the
+    number exists — and the gate above already refused an empty section."""
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    heading = "## %s — %s" % (version, datetime.date.today().isoformat())
+    text, renamed = re.subn(r"^## Unreleased[^\n]*\n",
+                            "## Unreleased\n\n%s\n" % heading,
+                            text, count=1, flags=re.M)
+    if not renamed:
+        return
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
 rewrite("$PLUGIN_JSON", set_plugin_version)
 rewrite("$MARKETPLACE_JSON", set_marketplace_version)
+release_changelog("$CHANGELOG_MD")
 PYEOF
-success "manifests bumped to $NEW_VERSION"
+success "manifests bumped to $NEW_VERSION, CHANGELOG section renamed"
 
 claude plugin validate . --strict >/dev/null 2>&1 || \
   error "the bumped manifests do not validate — nothing was pushed, fix and retry."
@@ -353,10 +391,6 @@ fi
 
 echo ""
 success "Released v$NEW_VERSION"
-# Checked after the fact, never as a gate: the version number is computed here,
-# so nobody can write the section before knowing what to call it.
-grep -q "^## $NEW_VERSION\b" CHANGELOG.md 2>/dev/null || \
-  warn "CHANGELOG.md has no '## $NEW_VERSION' section yet — add one"
 echo ""
 echo "  Users install it with:"
 echo "    /plugin marketplace add ${REMOTE_SLUG:-<owner/repo>}"

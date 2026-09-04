@@ -97,7 +97,8 @@ from .constants import (ADMIN_COMMAND, BRAZILIAN_PORTUGUESE,
                         PLUGIN_ROOT, REMEMBER_AGAIN_ENV_VAR,
                         RULE_NAME_EXTRA_CHARS, RULE_SEPARATOR, RULE_WARN_CHARS,
                         RULES_CLOSE_TAG, RULES_DIR_RELPATH, RULES_OPEN_TAG,
-                        SESSION_NOTICE, STATE_MAX_AGE_SECONDS,
+                        MAX_STATS_DIRS_PER_RULE, MAX_STATS_RULES,
+                        SESSION_NOTICE, STATE_MAX_AGE_SECONDS, STATS_FILE_NAME,
                         STATE_READ_CHUNK_BYTES, SUPERSEDE_NOTICE,
                         TOKEN_REGRESSION_SLACK, TOOL_ANY_VALUES, TOOL_KIND_ANY,
                         TOOL_KIND_READ, TOOL_KIND_WRITE, TOOL_KINDS,
@@ -136,6 +137,8 @@ from .state import (cleanup_stale_state, close_state,
                     coerce_seen_entry, context_size, detect_context_regression,
                     is_due, lock_exclusive, open_state, pop_superseded_entries,
                     save_state, state_dir, state_file_for)
+from .stats import (load_stats, matched_dir, record_injections, rule_key,
+                    stats_path)
 from .context import build_context, defang, neutralize
 from .main import (build_blocks, cli, config_for_scopes, enforce_denial, main,
                    messages_for_scopes, reset_session, session_notice)

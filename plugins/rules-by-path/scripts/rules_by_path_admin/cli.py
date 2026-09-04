@@ -7,18 +7,24 @@ import sys
 
 from .common import HOOK, AdminError, fail
 from .config import cmd_config
+from .digest import cmd_digest
+from .doctor import cmd_doctor
 from .enforce import cmd_enforce
 from .migrate import cmd_migrate
+from .move import ANCHOR_CHOICES, cmd_move
 from .rules import (cmd_add, cmd_init, cmd_list, cmd_remove, cmd_show,
-                    cmd_update, cmd_which)
+                    cmd_update)
+from .status import cmd_status
 from .validate import cmd_validate
+from .which import cmd_which
 
 # Declaration order is what `--help` and the "invalid choice" error list.
 COMMANDS = {"init": cmd_init, "list": cmd_list, "show": cmd_show,
             "which": cmd_which, "add": cmd_add, "update": cmd_update,
             "remove": cmd_remove, "validate": cmd_validate,
             "config": cmd_config, "migrate": cmd_migrate,
-            "enforce": cmd_enforce}
+            "enforce": cmd_enforce, "status": cmd_status,
+            "doctor": cmd_doctor, "move": cmd_move, "digest": cmd_digest}
 
 
 def main():
@@ -47,7 +53,28 @@ def main():
                              "sent again: '30k' (tokens), '25 calls', or 'never'. "
                              "Defaults to what the rule's type declares")
     parser.add_argument("--force", action="store_true", help="overwrite an existing rule")
-    parser.add_argument("--path", help="file/folder to resolve (which)")
+    parser.add_argument("--path", help="file/folder to resolve (which; optional "
+                                       "on status)")
+    parser.add_argument("--json", action="store_true",
+                        help="status: print the report as JSON")
+    parser.add_argument("--to-global", dest="to_global", action="store_true",
+                        help="move: destination is the global scope")
+    parser.add_argument("--to-root", dest="to_root",
+                        help="move: destination is this project root")
+    parser.add_argument("--anchor", choices=list(ANCHOR_CHOICES),
+                        help="move --to-global: what a root-anchored glob "
+                             "should mean there — in any project (**/glob) or "
+                             "only in this one (absolute path)")
+    parser.add_argument("--sessions", type=int,
+                        help="digest: how many recent sessions to distill")
+    parser.add_argument("--max-chars", dest="max_chars", type=int,
+                        help="digest: overall size budget of the output")
+    parser.add_argument("--fix", action="store_true",
+                        help="doctor: apply the deterministic fixes (migration, "
+                             "hardening) and re-check")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="doctor: remove the deny entries and cached state "
+                             "the plugin left behind; rule directories are kept")
     parser.add_argument("--list", action="store_true",
                         help="enforce: show enforce: deny rules and their native "
                              "deny equivalents")
@@ -69,13 +96,33 @@ def main():
             args.glob = args.glob[0]
     if args.command == "which" and not args.path:
         fail("'which' requires --path")
+    if args.command == "move":
+        if not args.rule:
+            fail("'move' requires --rule")
+        if bool(args.to_global) == bool(args.to_root):
+            fail("'move' requires --to-global OR --to-root <project-root>")
+        if args.anchor and not args.to_global:
+            fail("--anchor only means something with --to-global")
+    elif args.to_global or args.to_root or args.anchor:
+        fail(f"'{args.command}' takes no --to-global/--to-root/--anchor; they "
+             f"belong to `move`")
     # A filter only means something on a file the command actually writes or
     # resolves. Accepting it silently elsewhere would read as "this rule now
     # excludes X" when nothing was written at all.
-    if args.command not in ("add", "update", "which"):
+    if args.command not in ("add", "update", "which", "status"):
         if args.exclude or args.tool:
             fail(f"'{args.command}' takes no --exclude/--tool; they belong to "
                  f"`add`, `update` and `which`")
+    if args.command == "status" and args.exclude:
+        fail("'status' takes no --exclude")
+    if args.json and args.command != "status":
+        fail(f"'{args.command}' takes no --json; it belongs to `status`")
+    if (args.fix or args.uninstall) and args.command != "doctor":
+        fail(f"'{args.command}' takes no --fix/--uninstall; they belong to `doctor`")
+    if args.fix and args.uninstall:
+        fail("'doctor' takes --fix OR --uninstall, not both")
+    if (args.sessions or args.max_chars) and args.command != "digest":
+        fail(f"'{args.command}' takes no --sessions/--max-chars; they belong to `digest`")
     if args.command == "enforce":
         if not (args.list or args.sync):
             fail("'enforce' requires --list or --sync")

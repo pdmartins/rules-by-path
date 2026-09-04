@@ -1,5 +1,5 @@
-"""The commands that read and write rule files: init, list, show, which, add,
-update, remove.
+"""The commands that read and write rule files: init, list, show, add,
+update, remove. `which` lives in which.py.
 
 `add` is the one command that refuses to guess: a rule needs a type, and this is
 the only moment in the whole system when a human is present to choose it."""
@@ -188,85 +188,6 @@ def cmd_show(args):
         warn(f"{args.rule} is not valid UTF-8; undecodable bytes are shown as "
              f"U+FFFD. An `update` will rewrite the file as UTF-8")
     sys.stdout.write(text)
-
-
-def restriction_suffix(fields):
-    """The parenthesised kind a rule restricts itself to, empty for a rule that
-    restricts itself to nothing — so a `which` listing shows at a glance which
-    of its matches are conditional."""
-    kinds = HOOK.tools_of(fields)
-    if len(kinds) != 1:
-        return ""
-    return f" ({kinds[0]} only)"
-
-
-def cmd_which(args):
-    scope_dir, anchor = scope_for(args)
-    if args.use_global:
-        abs_path = os.path.abspath(args.path)
-        rel_path = None
-        shown = abs_path
-    else:
-        abs_path = args.path if os.path.isabs(args.path) else os.path.join(anchor, args.path)
-        abs_path = os.path.normpath(abs_path)
-        rel_path = os.path.relpath(abs_path, anchor).replace(os.sep, "/")
-        if rel_path.startswith(".."):
-            fail(f"path outside the root {anchor}: {abs_path}")
-        shown = rel_path
-    abs_posix = abs_path.replace(os.sep, "/")
-
-    # A folder query must also find globs like 'docs/**', which only match
-    # paths INSIDE the folder — probe with a synthetic child.
-    looks_like_a_file = "." in os.path.basename(abs_path.rstrip("/"))
-    is_dir_query = (os.path.isdir(abs_path) or args.path.endswith("/")
-                    or (not os.path.exists(abs_path) and not looks_like_a_file))
-    # The paths the hook matches a glob against, from the hook's own function.
-    # This command answers "what will the injection do with this path", so a
-    # second, narrower notion of the path here is a wrong answer: the local copy
-    # left out the resolved path, and reported "no rule covers" for any file
-    # reached through a directory symlink that the hook does inject into.
-    targets = HOOK.path_targets(abs_posix,
-                                os.path.realpath(abs_path).replace(os.sep, "/"),
-                                None if args.use_global else anchor)
-    if is_dir_query:
-        targets.append((None if rel_path is None else f"{rel_path.rstrip('/')}/__probe__",
-                        f"{abs_posix.rstrip('/')}/__probe__"))
-
-    # The tool is part of the question now that a rule may restrict itself to
-    # one kind of call: `--tool write` asks what fires when this path is
-    # WRITTEN. Without it the filters are reported rather than applied, so the
-    # answer still lists every rule that covers the path.
-    kind = None if args.tool in HOOK.TOOL_ANY_VALUES else args.tool
-    matches = []
-    taken_back = False  # some rule's glob covered the path, a filter took it back
-    if os.path.isdir(scope_dir):
-        for name, fields, _body in rules_in(scope_dir):
-            applied = HOOK.applied_glob(fields, targets, kind)
-            if applied is not None:
-                matches.append(name)
-                print(f"match: rule {name}{restriction_suffix(fields)}")
-                continue
-            # Not applying is the answer people actually come here with — "why
-            # is my rule not firing?" — so a rule the glob DOES cover says
-            # which filter took it back rather than staying silent.
-            covered = HOOK.first_matching_glob(HOOK.globs_of(fields), targets)
-            if covered is None:
-                continue
-            excluded = HOOK.first_matching_glob(HOOK.excludes_of(fields), targets)
-            taken_back = True
-            if excluded is not None:
-                print(f"excluded: rule {name} — {covered!r} covers this path, "
-                      f"{EXCLUDE_KEY}: {excluded!r} takes it back")
-            else:
-                print(f"filtered: rule {name} — {covered!r} covers this path, "
-                      f"but the rule is {TOOL_KEY}: "
-                      f"{', '.join(HOOK.tools_of(fields))} only")
-    if not matches:
-        # "covers" and "injects" part company once filters exist: a rule listed
-        # above covers this path and still will not fire, and saying nothing
-        # covers it would contradict the line right before.
-        print(f"no rule injects for '{shown}'" if taken_back
-              else f"no rule covers '{shown}'")
 
 
 def cmd_add(args):

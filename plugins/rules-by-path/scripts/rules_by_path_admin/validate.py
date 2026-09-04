@@ -223,19 +223,19 @@ def reinforcement_notes(name, body, fields, config):
     return []
 
 
-def validate_scope(scope_dir, anchor=None, quiet=False, config=None, is_global=False):
-    """Print notes and errors; return the number of errors. Notes are advice
-    (a long rule, a shared glob, a rule that looks like it should be split);
-    errors mean something will not work.
+def scope_findings(scope_dir, anchor=None, config=None, is_global=False):
+    """(notes, problems, rule count) for a scope directory that exists. Notes
+    are advice (a long rule, a shared glob, a rule that looks like it should
+    be split); problems mean something will not work.
+
+    Computed here and printed by `validate_scope`, so `status` can fold the
+    same findings into its own report without capturing another command's
+    output.
 
     `is_global` decides whether an `enforce: deny` rule here would actually be
     honoured by the hook — see `enforce_notes` — and defaults to False so a
     caller that has not been updated to pass it merely loses that one note
     rather than misreporting a global scope as a project one."""
-    if not os.path.isdir(scope_dir):
-        if not quiet:
-            print("(no rules in this scope — nothing to validate)")
-        return 0
     config = config or {}
     problems = []
     notes = []
@@ -308,12 +308,23 @@ def validate_scope(scope_dir, anchor=None, quiet=False, config=None, is_global=F
         notes.append(f"rules total {total} chars; one injection is capped at "
                      f"{HOOK.MAX_TOTAL_CHARS}, so a file matching many of them "
                      f"gets the rest on later tool calls")
+    return notes, problems, len(rules)
+
+
+def validate_scope(scope_dir, anchor=None, quiet=False, config=None, is_global=False):
+    """Print notes and errors; return the number of errors."""
+    if not os.path.isdir(scope_dir):
+        if not quiet:
+            print("(no rules in this scope — nothing to validate)")
+        return 0
+    notes, problems, rule_count = scope_findings(scope_dir, anchor, config,
+                                                 is_global)
     for note in notes:
         print(f"note: {note}")
     for problem in problems:
         print(f"ERROR: {problem}", file=sys.stderr)
     if not quiet and not problems:
-        print(f"validation ok: {len(rules)} rule(s)")
+        print(f"validation ok: {rule_count} rule(s)")
     return len(problems)
 
 

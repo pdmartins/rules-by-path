@@ -20,11 +20,16 @@ Subcommands:
          [--exclude G] [--tool read|write]  narrow it past its glob
   update --rule N             replace a rule's body (stdin), keeping its globs
   remove --rule N | --glob G  delete a rule file
+  move   --rule N --to-global [--anchor any-project|this-project] | --to-root R
+                              carry a rule to the other scope, rewriting its globs
   validate                    check every rule: frontmatter, globs, size, safety
   config                      the effective config.json: rule types and defaults
   migrate                     bring a scope up to the current format
   enforce --list              enforce: deny rules and their native deny equivalents
   enforce --sync              write those equivalents into a project's settings.json
+  status [--path P] [--json]  environment, both scopes, findings, coverage, config
+  doctor [--fix|--uninstall]  setup checks, each finding naming its fix
+  digest [--sessions N]       harvest sources + the user's turns from recent sessions
 
 Scope: --root <project-root> (project) or --global (~/.claude).
 """

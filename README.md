@@ -92,8 +92,8 @@ In Claude Code:
 /plugin install rules-by-path@pdmartins
 ```
 
-Then run `/rules-by-path:setup` once — it checks prerequisites, smoke-tests
-the hook, and offers the recommended permission hardening.
+Then run `/rules-by-path:doctor` once — it checks prerequisites, smoke-tests
+the hook, and offers the recommended permission hardening (`doctor --fix`).
 
 **Requirements:** Python 3.8+ on `PATH` as `python3`, `python` or (Windows)
 the `py` launcher. Standard library only — nothing to install. Tested on Linux
@@ -129,6 +129,10 @@ prohibition-shaped constraints are the ones measured to decay under long
 context, so the other types default to `never` and pay reinforcement's token
 cost only when a rule opts back in.
 
+The type is the one thing Claude does not guess — it says what violating the
+rule costs, not what the rule is about — so when your request leaves it open,
+it asks, with the configured types as the options to pick from.
+
 A rule can declare several globs, and several rules can share one glob — they
 all inject together.
 
@@ -160,6 +164,13 @@ repository boundary, so a git submodule receives its parent repository's rules.
 Your global rules are budgeted first, so rules arriving with a cloned repo can
 never crowd them out. Project rules are committed with the repo, so the whole
 team shares them.
+
+A rule can change scope — `move --rule <name> --root <root> --to-global`, or
+`--global … --to-root <root>` — and the CLI rewrites its globs for the new
+frame: bare names and `**/`-floating globs travel as they are, an absolute glob
+becomes project-relative, and a root-anchored glob going global is refused
+until you say whether it should hold in any project (`--anchor any-project`,
+giving `**/src/api/**`) or only in this one (`--anchor this-project`).
 
 ## Narrowing a rule further
 
@@ -236,6 +247,26 @@ glob: infra/**
 remember_again_after: 50k
 ---
 ```
+
+## Usage stats, and improving rules with them
+
+Every injection is counted, per rule, in one small file beside the session
+state (`usage-stats.json`): injections, repeats, distinct sessions, first and
+last date, the directories the rule fired under and the glob that matched —
+every collection bounded, session ids never shown. `status` prints it next to
+each rule and derives two notes from it: a rule **never injected** since stats
+began, and a rule that fires often but **always under one subfolder** of a
+wider glob, with the narrower glob to use.
+
+The `rules-by-path:improve` skill turns that, plus the validator's notes, into
+proposals — prune, narrow, split, reword — and harvests path-bound
+instructions out of `CLAUDE.md` files and native `.claude/rules/*.md` into
+rules that also fire on writes. Its second input, `digest --root <root>`,
+lists those sources and distills your own turns from this project's most
+recent sessions (harness noise dropped, everything bounded), pairing each
+session with the rules injected in it, so a correction that followed an
+injection is visible as a rule that did not land. It reads only this
+project's transcripts, and only when asked.
 
 ## Configuration
 
@@ -393,8 +424,8 @@ guarantees listed above, each covered by a regression test in
 
 ### Recommended hardening
 
-`/rules-by-path:setup` offers deny-list entries for your
-`~/.claude/settings.json`:
+`/rules-by-path:doctor` offers deny-list entries for your
+`~/.claude/settings.json` (`doctor --fix` writes them, after you agree):
 
 ```json
 "permissions": {
@@ -478,21 +509,22 @@ is refused.
 ## Uninstalling
 
 `/plugin uninstall rules-by-path@pdmartins` removes the hook and the
-skills. Three things outlive it, and `/rules-by-path:setup` walks you through
-them: the deny-list entries above (remove them, or those paths stay
-unreadable), the cache at `~/.claude/cache/rules-by-path`, and your authored
-rules in `~/.claude/rules-by-path/` and each project's
-`.claude/rules-by-path/`.
+skills. Three things outlive it. `doctor --uninstall` removes the first two —
+the deny-list entries above (otherwise those paths stay unreadable) and the
+cached state at `~/.claude/cache/rules-by-path` — and deliberately keeps the
+third, your authored rules in `~/.claude/rules-by-path/` and each project's
+`.claude/rules-by-path/`, listing them so you can decide.
 
 ## Troubleshooting
 
-Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directly:
+Two commands answer nearly everything; `/rules-by-path:status` and the
+`rules-by-path:doctor` skill run them for you:
 
 ```bash
-# which rules cover this file? (uses the hook's own matching)
-"<plugin>/bin/rules-by-path" which --root <root> --path <file>
-# rules that can never fire, empty rules, long rules, shared globs
-"<plugin>/bin/rules-by-path" validate --root <root>
+# both scopes, their findings, what covers a path, the config in force, usage
+"<plugin>/bin/rules-by-path" status --root <root> [--path <file>] [--json]
+# every setup check, each finding naming its fix; --fix applies the safe ones
+"<plugin>/bin/rules-by-path" doctor --root <root> [--fix]
 ```
 
 - **Rule not injecting?** Each rule version injects once per session. The
@@ -502,11 +534,11 @@ Just ask Claude — the `rules-by-path:manage` skill runs these for you. Directl
   the path from the touched file up to the filesystem root — the walk does not
   stop at a repository boundary, so this is rarely the cause — and that
   `validate` reports it.
-- **Upgrading from the `rules-map.yml` format?** Run
-  `"<plugin>/bin/rules-by-path" migrate --root <root>` (and `--global`). Until
-  you do, that scope injects nothing and the hook says so in context.
-- **Nothing happens at all?** Run `/rules-by-path:setup`, which smoke-tests the
-  hook and reports whether Python was found.
+- **Upgrading from the `rules-map.yml` format, or from pre-0.4.0 names?**
+  `doctor` reports it and `doctor --fix` runs `migrate` for you. Until then,
+  a scope holding a `rules-map.yml` injects nothing and the hook says so.
+- **Nothing happens at all?** `doctor` smoke-tests the hook and reports
+  whether Python was found.
 - **Hook errors** are printed to stderr (visible in verbose mode) and never
   block the tool call.
 
@@ -524,7 +556,7 @@ plugins/
     ├── hooks/                    PreToolUse injection + SessionStart
     ├── bin/                      launchers (POSIX + .cmd), on PATH when installed
     ├── scripts/                  the management CLI the skills drive
-    ├── skills/                   manage, setup
+    ├── skills/                   manage, doctor, improve
     └── commands/                 /rules-by-path:status
 tests/                            development only
 publish.sh                        development only
