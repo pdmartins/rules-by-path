@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/2.0.0/).
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-04
+
 One deterministic command per job — `status`, `doctor`, `move`, `digest` — and
 skills that shrink to what needs judgement.
 
