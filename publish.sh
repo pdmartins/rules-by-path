@@ -10,7 +10,7 @@
 # solves that properly by reinstalling instead of comparing version strings.
 # The CHANGELOG follows the same policy: entries are written under
 # `## Unreleased` while developing, and a release renames that heading to the
-# number it just computed. This script refuses to release an empty one.
+# number it just computed, dated. This script refuses to release an empty one.
 #
 # WHERE THE LOCAL INSTALL COMES FROM. The mode decides, and the script repoints
 # the marketplace accordingly: a release installs from GitHub — exactly what it
@@ -271,7 +271,7 @@ echo ""
 
 if $DRY_RUN; then
   dry "bump $CURRENT_VERSION → $NEW_VERSION in plugin.json and marketplace.json"
-  dry "rename CHANGELOG.md's '## Unreleased' to '## $NEW_VERSION', empty one above"
+  dry "rename CHANGELOG.md's '## Unreleased' to '## $NEW_VERSION — $(date +%F)', empty one above"
   dry "git commit -am 'release: v$NEW_VERSION' && git push origin $CURRENT_BRANCH"
   dry "git checkout $RELEASE_BRANCH  (created from $CURRENT_BRANCH if absent)"
   dry "git merge --no-ff $CURRENT_BRANCH -m 'release: v$NEW_VERSION'"
@@ -295,7 +295,7 @@ fi
 
 # ─── bump, commit, merge, push ────────────────────────────────────────────────
 RBP_NEW_VERSION="$NEW_VERSION" RBP_PLUGIN_NAME="$PLUGIN_NAME" python3 - <<PYEOF
-import json, os, re
+import datetime, json, os, re
 
 version = os.environ["RBP_NEW_VERSION"]
 plugin_name = os.environ["RBP_PLUGIN_NAME"]
@@ -323,8 +323,9 @@ def release_changelog(path):
     number exists — and the gate above already refused an empty section."""
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
+    heading = "## %s — %s" % (version, datetime.date.today().isoformat())
     text, renamed = re.subn(r"^## Unreleased[^\n]*\n",
-                            "## Unreleased\n\n## %s\n" % version,
+                            "## Unreleased\n\n%s\n" % heading,
                             text, count=1, flags=re.M)
     if not renamed:
         return
