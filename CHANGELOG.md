@@ -37,6 +37,12 @@ a version at all: `bash publish.sh --local` reinstalls it.
   evidence and the exact command, and applies only what the user picks.
 - `manage` skill: 491 lines down to 125; the reference material lives in
   `references/` and is read on demand.
+- The three answers only the user has — a rule's type, an ambiguous scope, and
+  the anchor of a glob going global — are asked as options to pick instead of
+  prose, and the type options are built from what `config` prints, so a
+  replaced taxonomy travels into the question. Splitting a paste asks for every
+  fragment's type in one round. More than four types, or nobody to answer (a
+  `-p` run, a subagent), falls back to prose and to the CLI's own refusal.
 
 **A rule can narrow itself past its glob: `exclude:` and `tool:`.**
 

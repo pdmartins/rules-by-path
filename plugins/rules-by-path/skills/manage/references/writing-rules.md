@@ -118,7 +118,8 @@ Then:
   the reader may have only this one.
 - **Name each one for what it asserts**, and confirm the type of each with the
   user when it is not obvious. One paste can produce a `BUSN`, an `ARCH` and a
-  `CONV`; asking once, about all three, costs one exchange.
+  `CONV`; asking once, about all three, costs one exchange — one question per
+  fragment in a single `AskUserQuestion` call.
 - **Run `validate` at the end** and read its notes: they catch the split you
   missed.
 

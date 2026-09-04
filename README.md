@@ -129,6 +129,10 @@ prohibition-shaped constraints are the ones measured to decay under long
 context, so the other types default to `never` and pay reinforcement's token
 cost only when a rule opts back in.
 
+The type is the one thing Claude does not guess — it says what violating the
+rule costs, not what the rule is about — so when your request leaves it open,
+it asks, with the configured types as the options to pick from.
+
 A rule can declare several globs, and several rules can share one glob — they
 all inject together.
 
