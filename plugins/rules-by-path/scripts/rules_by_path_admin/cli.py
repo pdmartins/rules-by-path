@@ -7,6 +7,7 @@ import sys
 
 from .common import HOOK, AdminError, fail
 from .config import cmd_config
+from .digest import cmd_digest
 from .doctor import cmd_doctor
 from .enforce import cmd_enforce
 from .migrate import cmd_migrate
@@ -23,7 +24,7 @@ COMMANDS = {"init": cmd_init, "list": cmd_list, "show": cmd_show,
             "remove": cmd_remove, "validate": cmd_validate,
             "config": cmd_config, "migrate": cmd_migrate,
             "enforce": cmd_enforce, "status": cmd_status,
-            "doctor": cmd_doctor, "move": cmd_move}
+            "doctor": cmd_doctor, "move": cmd_move, "digest": cmd_digest}
 
 
 def main():
@@ -64,6 +65,10 @@ def main():
                         help="move --to-global: what a root-anchored glob "
                              "should mean there — in any project (**/glob) or "
                              "only in this one (absolute path)")
+    parser.add_argument("--sessions", type=int,
+                        help="digest: how many recent sessions to distill")
+    parser.add_argument("--max-chars", dest="max_chars", type=int,
+                        help="digest: overall size budget of the output")
     parser.add_argument("--fix", action="store_true",
                         help="doctor: apply the deterministic fixes (migration, "
                              "hardening) and re-check")
@@ -116,6 +121,8 @@ def main():
         fail(f"'{args.command}' takes no --fix/--uninstall; they belong to `doctor`")
     if args.fix and args.uninstall:
         fail("'doctor' takes --fix OR --uninstall, not both")
+    if (args.sessions or args.max_chars) and args.command != "digest":
+        fail(f"'{args.command}' takes no --sessions/--max-chars; they belong to `digest`")
     if args.command == "enforce":
         if not (args.list or args.sync):
             fail("'enforce' requires --list or --sync")

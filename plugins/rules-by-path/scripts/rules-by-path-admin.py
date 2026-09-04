@@ -29,6 +29,7 @@ Subcommands:
   enforce --sync              write those equivalents into a project's settings.json
   status [--path P] [--json]  environment, both scopes, findings, coverage, config
   doctor [--fix|--uninstall]  setup checks, each finding naming its fix
+  digest [--sessions N]       harvest sources + the user's turns from recent sessions
 
 Scope: --root <project-root> (project) or --global (~/.claude).
 """

@@ -14,6 +14,7 @@ Layout — one concern per module, none over 400 lines:
     which.py     which — what covers a path, by the hook's own matcher
     status.py    status — the whole picture in one read-only call
     doctor.py    doctor — setup checks, --fix, --uninstall
+    digest.py    digest — what the improve skill reasons over, distilled
     hardening.py the recommended permissions.deny entries: check, apply, remove
     migrate.py   bringing a scope up to the current format
     move.py      carrying a rule between scopes, globs rewritten
