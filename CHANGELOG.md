@@ -270,6 +270,16 @@ the block early, nor impersonate the harness (`<system-reminder>`,
   instructions are themselves a driver of long-context collapse
   (arXiv:2608.02639).
 
+### Release
+
+- **`publish.sh` refuses an empty `## Unreleased`, and renames it on the way
+  out.** The section is checked before anything is pushed — a release that says
+  nothing about itself cannot be fixed after the merge — and the same block
+  that bumps the manifests renames that heading to the version it just
+  computed, leaving an empty `## Unreleased` above it for the next cycle. It
+  replaces a warning printed after the push, which 0.3.0, 0.4.0 and 0.5.0 all
+  shipped past.
+
 ### Docs
 
 - **Two stale claims corrected.** "Design guarantees" no longer cites a
